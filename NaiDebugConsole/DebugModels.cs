@@ -46,6 +46,14 @@ public sealed record AddonInspectorValue(
     string Type,
     string Value);
 
+public sealed record ShareTraceEvent(
+    DateTime SeenAtUtc,
+    double ElapsedSeconds,
+    string Category,
+    string Name,
+    string Details,
+    bool IsFocused);
+
 public sealed record TofuInspectorSnapshot(
     DateTime SeenAtUtc,
     IReadOnlyList<TofuInspectorDataSet> DataSets,

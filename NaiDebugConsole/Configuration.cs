@@ -24,6 +24,12 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool TofuFunctionWatchEnabled { get; set; }
 
+    public bool ShareTraceCaptureOnlyFilteredAddons { get; set; } = true;
+
+    public bool ShareTraceAutoSnapshotConfirmationDialog { get; set; } = true;
+
+    public string ShareTraceAddonFilter { get; set; } = "tofu strategy board notification selectyes selectyesno contextmenu addoncontextsub";
+
     public int SnapshotIntervalMs { get; set; } = 250;
 
     public int MaxLogFileSizeMb { get; set; } = 25;

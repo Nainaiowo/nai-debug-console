@@ -16,13 +16,17 @@ public sealed class ConfigWindow : Window, IDisposable
     private string addonInspectorName = string.Empty;
     private string addonInspectorEventFilter = string.Empty;
     private string debugTextFilter = string.Empty;
+    private string shareTraceAddonFilter = string.Empty;
+    private string shareTraceEventFilter = string.Empty;
     private string tofuCreateResult = string.Empty;
     private bool addonInspectorHideCommonNoise = true;
+    private bool shareTraceFocusedOnly = true;
 
     public ConfigWindow(Plugin plugin) : base("Nai Debug Console###NaiDebugConsoleConfig")
     {
         this.plugin = plugin;
         configuration = plugin.Configuration;
+        shareTraceAddonFilter = configuration.ShareTraceAddonFilter ?? string.Empty;
         Size = new Vector2(920, 680);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
@@ -56,6 +60,12 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.BeginTabItem("Strategy Boards"))
         {
             DrawStrategyBoardTools();
+            ImGui.EndTabItem();
+        }
+
+        if (ImGui.BeginTabItem("Share Trace"))
+        {
+            DrawShareTraceTools();
             ImGui.EndTabItem();
         }
 
@@ -247,6 +257,178 @@ public sealed class ConfigWindow : Window, IDisposable
         {
             DrawTofuDataSet(dataSet);
         }
+    }
+
+    private void DrawShareTraceTools()
+    {
+        ImGui.TextColored(EnabledColor, "Strategy share trace");
+        ImGui.TextDisabled("Start this right before manually sharing a Strategy Board. Stop it after the Yes/No prompt is answered.");
+
+        if (plugin.ShareTraceActive)
+        {
+            ImGui.TextColored(EnabledColor, "Trace is recording.");
+        }
+        else if (plugin.ShareTraceStoppedAtUtc is { } stoppedAt)
+        {
+            ImGui.TextDisabled($"Trace stopped at {stoppedAt:HH:mm:ss} UTC.");
+        }
+        else
+        {
+            ImGui.TextDisabled("Trace is idle.");
+        }
+
+        if (!plugin.ShareTraceActive && ImGui.Button("Start share trace"))
+        {
+            plugin.StartShareTrace();
+        }
+
+        ImGui.SameLine();
+        if (plugin.ShareTraceActive && ImGui.Button("Stop share trace"))
+        {
+            plugin.StopShareTrace();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Clear trace"))
+        {
+            plugin.ClearShareTrace();
+        }
+
+        ImGui.Spacing();
+        var filteredOnly = configuration.ShareTraceCaptureOnlyFilteredAddons;
+        if (ImGui.Checkbox("Only capture matching addon lifecycle events", ref filteredOnly))
+        {
+            plugin.SetShareTraceCaptureOnlyFilteredAddons(filteredOnly);
+        }
+
+        var snapshotDialog = configuration.ShareTraceAutoSnapshotConfirmationDialog;
+        if (ImGui.Checkbox("Snapshot confirmation dialog automatically", ref snapshotDialog))
+        {
+            plugin.SetShareTraceAutoSnapshotConfirmationDialog(snapshotDialog);
+        }
+
+        ImGui.SetNextItemWidth(MathF.Max(320.0f, ImGui.GetContentRegionAvail().X * 0.55f));
+        if (ImGui.InputText("Addon capture terms##ShareTraceAddonFilter", ref shareTraceAddonFilter, 256))
+        {
+            plugin.SetShareTraceAddonFilter(shareTraceAddonFilter);
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Share preset"))
+        {
+            shareTraceAddonFilter = "tofu strategy board notification selectyes selectyesno contextmenu addoncontextsub";
+            plugin.SetShareTraceAddonFilter(shareTraceAddonFilter);
+        }
+
+        ImGui.SetNextItemWidth(MathF.Max(240.0f, ImGui.GetContentRegionAvail().X * 0.35f));
+        ImGui.InputText("Trace event filter##ShareTraceEventFilter", ref shareTraceEventFilter, 128);
+        ImGui.SameLine();
+        ImGui.Checkbox("Focused only", ref shareTraceFocusedOnly);
+
+        DrawShareTraceEvents();
+
+        ImGui.Spacing();
+        DrawTraceSnapshotSummary("Start Strategy Board snapshot", plugin.ShareTraceStartSnapshot);
+        DrawTraceSnapshotSummary("End Strategy Board snapshot", plugin.ShareTraceEndSnapshot);
+        DrawShareTraceConfirmationSnapshot();
+    }
+
+    private void DrawShareTraceEvents()
+    {
+        var allEvents = plugin.ShareTraceEvents;
+        var events = allEvents
+            .Where(MatchesShareTraceEvent)
+            .Take(200)
+            .OrderBy(entry => entry.SeenAtUtc)
+            .ToList();
+
+        ImGui.TextDisabled($"Showing {events.Count:N0} of {allEvents.Count:N0} trace events.");
+        if (events.Count == 0)
+        {
+            return;
+        }
+
+        if (!ImGui.BeginTable("##ShareTraceEvents", 6, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerV))
+        {
+            return;
+        }
+
+        ImGui.TableSetupColumn("UTC", ImGuiTableColumnFlags.WidthStretch, 0.65f);
+        ImGui.TableSetupColumn("+s", ImGuiTableColumnFlags.WidthStretch, 0.45f);
+        ImGui.TableSetupColumn("Type", ImGuiTableColumnFlags.WidthStretch, 0.55f);
+        ImGui.TableSetupColumn("Name", ImGuiTableColumnFlags.WidthStretch, 1.35f);
+        ImGui.TableSetupColumn("Focus", ImGuiTableColumnFlags.WidthStretch, 0.45f);
+        ImGui.TableSetupColumn("Details", ImGuiTableColumnFlags.WidthStretch, 3.0f);
+        ImGui.TableHeadersRow();
+
+        foreach (var entry in events)
+        {
+            ImGui.TableNextRow();
+            DrawTableText(0, entry.SeenAtUtc.ToString("HH:mm:ss"));
+            DrawTableText(1, entry.ElapsedSeconds.ToString("0.000", CultureInfo.InvariantCulture));
+            DrawTableText(2, entry.Category);
+            DrawTableText(3, entry.Name, wrap: true);
+            DrawTableText(4, entry.IsFocused ? "yes" : "no", disabled: !entry.IsFocused);
+            DrawTableText(5, entry.Details, wrap: true);
+        }
+
+        ImGui.EndTable();
+    }
+
+    private void DrawTraceSnapshotSummary(string label, TofuInspectorSnapshot? snapshot)
+    {
+        if (snapshot is null)
+        {
+            ImGui.TextDisabled($"{label}: none");
+            return;
+        }
+
+        if (!ImGui.TreeNode($"{label} ({snapshot.SeenAtUtc:HH:mm:ss} UTC)###{label}"))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(snapshot.Error))
+        {
+            ImGui.TextColored(WarningColor, snapshot.Error);
+            ImGui.TreePop();
+            return;
+        }
+
+        foreach (var dataSet in snapshot.DataSets)
+        {
+            var objectCount = dataSet.Boards.Sum(board => board.ObjectCount);
+            ImGui.TextUnformatted($"{dataSet.Name}: {dataSet.Boards.Count:N0} captured board(s), total {dataSet.Total:N0}, max {dataSet.MaxCount:N0}, objects {objectCount:N0}");
+        }
+
+        ImGui.TreePop();
+    }
+
+    private void DrawShareTraceConfirmationSnapshot()
+    {
+        var snapshot = plugin.ShareTraceConfirmationSnapshot;
+        if (snapshot is null)
+        {
+            ImGui.TextDisabled("Confirmation dialog snapshot: none");
+            return;
+        }
+
+        if (!ImGui.TreeNode($"Confirmation dialog snapshot ({snapshot.AddonName}, {snapshot.SeenAtUtc:HH:mm:ss} UTC)###ShareTraceConfirmationSnapshot"))
+        {
+            return;
+        }
+
+        ImGui.TextDisabled($"{FormatAddress(snapshot.Address)} | Ready {FormatBool(snapshot.IsReady)} | Visible {FormatBool(snapshot.IsVisible)} | AtkValues {snapshot.AtkValues.Count:N0} | Nodes {snapshot.NodeCount:N0}");
+        if (!string.IsNullOrWhiteSpace(snapshot.Error))
+        {
+            ImGui.TextColored(WarningColor, snapshot.Error);
+            ImGui.TreePop();
+            return;
+        }
+
+        DrawAddonValues(snapshot);
+        DrawAddonNodes(snapshot);
+        ImGui.TreePop();
     }
 
     private void DrawTofuDataSet(TofuInspectorDataSet dataSet)
@@ -599,6 +781,23 @@ public sealed class ConfigWindow : Window, IDisposable
     private bool MatchesLogEntry(DebugLogEntry entry)
     {
         return MatchesFilter(entry.SeenAtUtc.ToString("HH:mm:ss"), entry.Message);
+    }
+
+    private bool MatchesShareTraceEvent(ShareTraceEvent entry)
+    {
+        if (shareTraceFocusedOnly && !entry.IsFocused)
+        {
+            return false;
+        }
+
+        return MatchesSpaceSeparatedFilter(
+            shareTraceEventFilter,
+            entry.SeenAtUtc.ToString("HH:mm:ss"),
+            entry.ElapsedSeconds.ToString("0.000", CultureInfo.InvariantCulture),
+            entry.Category,
+            entry.Name,
+            entry.Details,
+            entry.IsFocused ? "focused" : "regular");
     }
 
     private bool MatchesFilter(params string?[] values)

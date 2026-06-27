@@ -263,6 +263,9 @@ public sealed partial class Plugin : IDalamudPlugin
         Configuration.SnapshotIntervalMs = Math.Clamp(Configuration.SnapshotIntervalMs, 100, 2_000);
         Configuration.MaxLogFileSizeMb = Math.Clamp(Configuration.MaxLogFileSizeMb, 5, 100);
         Configuration.MaxLogFiles = Math.Clamp(Configuration.MaxLogFiles, 2, 30);
+        Configuration.ShareTraceAddonFilter = string.IsNullOrWhiteSpace(Configuration.ShareTraceAddonFilter)
+            ? "tofu strategy board notification selectyes selectyesno contextmenu addoncontextsub"
+            : NormalizeTraceFilter(Configuration.ShareTraceAddonFilter);
         SaveConfiguration();
     }
 

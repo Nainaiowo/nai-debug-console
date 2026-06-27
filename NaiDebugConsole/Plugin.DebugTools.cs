@@ -25,6 +25,7 @@ public sealed partial class Plugin
     private const int MaxAddonInspectorEvents = 500;
     private const int MaxAddonInspectorNodes = 500;
     private const int MaxAddonInspectorAtkValues = 128;
+    private const int MaxShareTraceEvents = 400;
     private const int AddonInspectorDuplicateSuppressSeconds = 3;
     private const int MaxTofuInspectorBoardsPerDataSet = 50;
     private const int MaxTofuInspectorObjectsPerBoard = 80;
@@ -87,12 +88,20 @@ public sealed partial class Plugin
 
     private readonly List<DebugLogEntry> debugLogEntries = [];
     private readonly List<AddonInspectorEvent> addonInspectorEvents = [];
+    private readonly List<ShareTraceEvent> shareTraceEvents = [];
     private readonly Dictionary<string, DateTime> addonInspectorEventSeenAtBySignature = new(StringComparer.Ordinal);
     private AddonInspectorSnapshot? addonInspectorSnapshot;
     private TofuInspectorSnapshot? tofuInspectorSnapshot;
+    private TofuInspectorSnapshot? shareTraceStartSnapshot;
+    private TofuInspectorSnapshot? shareTraceEndSnapshot;
+    private AddonInspectorSnapshot? shareTraceConfirmationSnapshot;
     private bool addonInspectorLifecycleRegistered;
     private bool debugToolsDisposed;
     private bool tofuFunctionWatchEnabled;
+    private bool shareTraceActive;
+    private bool shareTraceEnabledTofuWatcher;
+    private DateTime shareTraceStartedAtUtc = DateTime.MinValue;
+    private DateTime? shareTraceStoppedAtUtc;
 
     private Hook<TofuContextMenuOptionsDelegate>? tofuContextMenuOptionsHook;
     private Hook<TofuCreateFolderDelegate>? tofuCreateFolderHook;
@@ -122,6 +131,22 @@ public sealed partial class Plugin
 
     public bool DebugTofuFunctionWatchEnabled => tofuFunctionWatchEnabled;
 
+    public IReadOnlyList<ShareTraceEvent> ShareTraceEvents => shareTraceEvents
+        .OrderByDescending(entry => entry.SeenAtUtc)
+        .ToList();
+
+    public bool ShareTraceActive => shareTraceActive;
+
+    public DateTime? ShareTraceStartedAtUtc => shareTraceStartedAtUtc == DateTime.MinValue ? null : shareTraceStartedAtUtc;
+
+    public DateTime? ShareTraceStoppedAtUtc => shareTraceStoppedAtUtc;
+
+    public TofuInspectorSnapshot? ShareTraceStartSnapshot => shareTraceStartSnapshot;
+
+    public TofuInspectorSnapshot? ShareTraceEndSnapshot => shareTraceEndSnapshot;
+
+    public AddonInspectorSnapshot? ShareTraceConfirmationSnapshot => shareTraceConfirmationSnapshot;
+
     private void InitializeDebugTools()
     {
         RegisterAddonInspectorLifecycleListeners();
@@ -147,6 +172,13 @@ public sealed partial class Plugin
         addonInspectorEventSeenAtBySignature.Clear();
         addonInspectorSnapshot = null;
         tofuInspectorSnapshot = null;
+        shareTraceEvents.Clear();
+        shareTraceStartSnapshot = null;
+        shareTraceEndSnapshot = null;
+        shareTraceConfirmationSnapshot = null;
+        shareTraceActive = false;
+        shareTraceStoppedAtUtc = null;
+        shareTraceStartedAtUtc = DateTime.MinValue;
         AddDebugLog("Debug console data cleared.");
     }
 
@@ -167,6 +199,106 @@ public sealed partial class Plugin
         {
             DisableTofuFunctionWatch();
         }
+    }
+
+    public void SetShareTraceCaptureOnlyFilteredAddons(bool enabled)
+    {
+        Configuration.ShareTraceCaptureOnlyFilteredAddons = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetShareTraceAutoSnapshotConfirmationDialog(bool enabled)
+    {
+        Configuration.ShareTraceAutoSnapshotConfirmationDialog = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetShareTraceAddonFilter(string filter)
+    {
+        Configuration.ShareTraceAddonFilter = NormalizeTraceFilter(filter);
+        SaveConfiguration();
+    }
+
+    public void StartShareTrace()
+    {
+        if (shareTraceActive)
+        {
+            return;
+        }
+
+        shareTraceEvents.Clear();
+        shareTraceStartSnapshot = null;
+        shareTraceEndSnapshot = null;
+        shareTraceConfirmationSnapshot = null;
+        shareTraceStoppedAtUtc = null;
+        shareTraceStartedAtUtc = DateTime.UtcNow;
+        shareTraceEnabledTofuWatcher = !tofuFunctionWatchEnabled;
+
+        if (shareTraceEnabledTofuWatcher)
+        {
+            SetTofuFunctionWatchEnabled(true);
+        }
+
+        try
+        {
+            shareTraceStartSnapshot = CaptureTofuInspectorSnapshotInternal();
+        }
+        catch (Exception ex)
+        {
+            shareTraceStartSnapshot = CreateTofuInspectorErrorSnapshot(ex.Message);
+        }
+
+        shareTraceActive = true;
+        AddShareTraceEvent("Trace", "Start", "Trace started. Manually open Strategy Board, choose the board/folder, click Share, then confirm Yes.", true);
+        AddDebugLog("Strategy share trace started.");
+    }
+
+    public void StopShareTrace()
+    {
+        if (!shareTraceActive)
+        {
+            return;
+        }
+
+        try
+        {
+            shareTraceEndSnapshot = CaptureTofuInspectorSnapshotInternal();
+        }
+        catch (Exception ex)
+        {
+            shareTraceEndSnapshot = CreateTofuInspectorErrorSnapshot(ex.Message);
+        }
+
+        shareTraceStoppedAtUtc = DateTime.UtcNow;
+        AddShareTraceEvent("Trace", "Stop", "Trace stopped and final Strategy Board snapshot captured.", true);
+        shareTraceActive = false;
+
+        if (shareTraceEnabledTofuWatcher)
+        {
+            shareTraceEnabledTofuWatcher = false;
+            SetTofuFunctionWatchEnabled(false);
+        }
+
+        AddDebugLog("Strategy share trace stopped.");
+    }
+
+    public void ClearShareTrace()
+    {
+        var shouldDisableWatcher = shareTraceActive && shareTraceEnabledTofuWatcher;
+        shareTraceEvents.Clear();
+        shareTraceStartSnapshot = null;
+        shareTraceEndSnapshot = null;
+        shareTraceConfirmationSnapshot = null;
+        shareTraceStoppedAtUtc = null;
+        shareTraceStartedAtUtc = DateTime.MinValue;
+        shareTraceActive = false;
+        shareTraceEnabledTofuWatcher = false;
+        if (shouldDisableWatcher)
+        {
+            SetTofuFunctionWatchEnabled(false);
+        }
+
+        AddDebugLog("Strategy share trace cleared.");
     }
 
     public void CaptureAddonInspectorSnapshot(string addonName)
@@ -317,6 +449,9 @@ public sealed partial class Plugin
                 addon.Address,
                 isKnown && addon.IsReady,
                 isKnown && addon.IsVisible));
+
+            AddShareTraceAddonEvent(eventType, args.AddonName, addon.Address, isKnown && addon.IsReady, isKnown && addon.IsVisible);
+            CaptureShareTraceConfirmationSnapshot(eventType, args.AddonName, addon);
 
             while (addonInspectorEvents.Count > MaxAddonInspectorEvents)
             {
@@ -663,7 +798,112 @@ public sealed partial class Plugin
             return;
         }
 
+        AddShareTraceEvent("Tofu", functionName, details, true);
         AddDebugLog($"Tofu watcher | {functionName}: {details}");
+    }
+
+    private void AddShareTraceAddonEvent(AddonEvent eventType, string addonName, nint address, bool isReady, bool isVisible)
+    {
+        if (!shareTraceActive)
+        {
+            return;
+        }
+
+        var focused = MatchesTraceFilter(addonName, eventType.ToString());
+        if (Configuration.ShareTraceCaptureOnlyFilteredAddons && !focused)
+        {
+            return;
+        }
+
+        AddShareTraceEvent(
+            "Addon",
+            addonName,
+            $"{eventType} | address {FormatPointer(address)} | ready {isReady} | visible {isVisible}",
+            focused);
+    }
+
+    private void CaptureShareTraceConfirmationSnapshot(AddonEvent eventType, string addonName, AtkUnitBasePtr addon)
+    {
+        if (!shareTraceActive ||
+            !Configuration.ShareTraceAutoSnapshotConfirmationDialog ||
+            !IsConfirmationAddon(addonName) ||
+            eventType is not (AddonEvent.PostSetup or AddonEvent.PostShow or AddonEvent.PostOpen))
+        {
+            return;
+        }
+
+        try
+        {
+            shareTraceConfirmationSnapshot = CaptureAddonInspectorSnapshot(addonName, addon);
+            AddShareTraceEvent(
+                "Confirmation",
+                addonName,
+                $"Snapshot captured with {shareTraceConfirmationSnapshot.AtkValues.Count:N0} AtkValue(s) and {shareTraceConfirmationSnapshot.NodeCount:N0} node(s).",
+                true);
+        }
+        catch (Exception ex)
+        {
+            AddShareTraceEvent("Confirmation", addonName, $"Snapshot failed: {ex.Message}", true);
+            Log.Debug(ex, "Could not capture Strategy share confirmation dialog snapshot.");
+        }
+    }
+
+    private void AddShareTraceEvent(string category, string name, string details, bool isFocused)
+    {
+        if (!shareTraceActive && category != "Trace")
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var elapsed = shareTraceStartedAtUtc == DateTime.MinValue
+            ? 0.0
+            : Math.Max(0.0, (now - shareTraceStartedAtUtc).TotalSeconds);
+
+        var entry = new ShareTraceEvent(now, elapsed, category, name, details, isFocused);
+        shareTraceEvents.Add(entry);
+        while (shareTraceEvents.Count > MaxShareTraceEvents)
+        {
+            shareTraceEvents.RemoveAt(0);
+        }
+
+        WriteRecord("strategy-share-trace", new
+        {
+            elapsedSeconds = entry.ElapsedSeconds,
+            entry.Category,
+            entry.Name,
+            entry.Details,
+            entry.IsFocused,
+        }, ignoreCaptureGate: true);
+    }
+
+    private bool MatchesTraceFilter(params string?[] values)
+    {
+        var terms = Configuration.ShareTraceAddonFilter.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (terms.Length == 0)
+        {
+            return true;
+        }
+
+        return terms.Any(term => values.Any(value => value?.Contains(term, StringComparison.OrdinalIgnoreCase) == true));
+    }
+
+    private static bool IsConfirmationAddon(string addonName)
+    {
+        var compact = addonName.Replace("_", string.Empty, StringComparison.Ordinal)
+            .Replace("-", string.Empty, StringComparison.Ordinal);
+        return compact.Contains("SelectYes", StringComparison.OrdinalIgnoreCase) ||
+            compact.Contains("SelectYesno", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeTraceFilter(string filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter))
+        {
+            return string.Empty;
+        }
+
+        return string.Join(' ', filter.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
     }
 
     private static unsafe TofuInspectorSnapshot CaptureTofuInspectorSnapshotInternal()
