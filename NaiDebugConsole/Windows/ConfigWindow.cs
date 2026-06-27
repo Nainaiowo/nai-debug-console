@@ -1,6 +1,7 @@
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Numerics;
@@ -22,6 +23,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private string tofuCreateResult = string.Empty;
     private bool addonInspectorHideCommonNoise = true;
     private bool shareTraceFocusedOnly = true;
+    private readonly HashSet<string> shareTraceHiddenCategories = new(StringComparer.OrdinalIgnoreCase);
 
     public ConfigWindow(Plugin plugin) : base("Nai Debug Console###NaiDebugConsoleConfig")
     {
@@ -317,10 +319,10 @@ public sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.Spacing();
-        var filteredOnly = configuration.ShareTraceCaptureOnlyFilteredAddons;
-        if (ImGui.Checkbox("Only capture matching addon lifecycle events", ref filteredOnly))
+        var captureAllAddons = !configuration.ShareTraceCaptureOnlyFilteredAddons;
+        if (ImGui.Checkbox("Capture all addon lifecycle events", ref captureAllAddons))
         {
-            plugin.SetShareTraceCaptureOnlyFilteredAddons(filteredOnly);
+            plugin.SetShareTraceCaptureOnlyFilteredAddons(!captureAllAddons);
         }
 
         var snapshotDialog = configuration.ShareTraceAutoSnapshotConfirmationDialog;
@@ -329,15 +331,15 @@ public sealed class ConfigWindow : Window, IDisposable
             plugin.SetShareTraceAutoSnapshotConfirmationDialog(snapshotDialog);
         }
 
-        var hoverProbe = configuration.ShareTraceHoverProbeEnabled;
-        if (ImGui.Checkbox("Probe board/folder hover state", ref hoverProbe))
+        var selectionProbe = configuration.ShareTraceHoverProbeEnabled;
+        if (ImGui.Checkbox("Probe board/list selection state", ref selectionProbe))
         {
-            plugin.SetShareTraceHoverProbeEnabled(hoverProbe);
+            plugin.SetShareTraceHoverProbeEnabled(selectionProbe);
         }
 
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Samples Strategy Board list state during share trace and records changes while hovering or selecting boards and folders.");
+            ImGui.SetTooltip("Samples Strategy Board list state during share trace and records changes when selected board/folder data changes.");
         }
 
         ImGui.SetNextItemWidth(MathF.Max(320.0f, ImGui.GetContentRegionAvail().X * 0.55f));
@@ -357,6 +359,8 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.InputText("Trace event filter##ShareTraceEventFilter", ref shareTraceEventFilter, 128);
         ImGui.SameLine();
         ImGui.Checkbox("Focused only", ref shareTraceFocusedOnly);
+        ImGui.SameLine();
+        DrawShareTraceCategoryFilter();
 
         DrawShareTraceEvents();
 
@@ -408,6 +412,67 @@ public sealed class ConfigWindow : Window, IDisposable
         ImGui.EndTable();
     }
 
+    private void DrawShareTraceCategoryFilter()
+    {
+        var categories = plugin.ShareTraceEvents
+            .Select(entry => entry.Category)
+            .Where(category => !string.IsNullOrWhiteSpace(category))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(category => category, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (categories.Count == 0)
+        {
+            ImGui.BeginDisabled();
+            ImGui.Button("Categories");
+            ImGui.EndDisabled();
+            return;
+        }
+
+        var hiddenCount = categories.Count(category => shareTraceHiddenCategories.Contains(category));
+        var label = hiddenCount == 0 ? "Categories" : $"Categories ({hiddenCount} hidden)";
+        if (!ImGui.BeginCombo("##ShareTraceCategoryFilter", label))
+        {
+            return;
+        }
+
+        if (ImGui.Button("Show all##ShareTraceCategoriesShowAll"))
+        {
+            shareTraceHiddenCategories.Clear();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Hide noise##ShareTraceCategoriesHideNoise"))
+        {
+            foreach (var category in categories.Where(category =>
+                         category.Equals("Addon", StringComparison.OrdinalIgnoreCase) ||
+                         category.Equals("Selection", StringComparison.OrdinalIgnoreCase) ||
+                         category.Equals("Hover", StringComparison.OrdinalIgnoreCase)))
+            {
+                shareTraceHiddenCategories.Add(category);
+            }
+        }
+
+        ImGui.Separator();
+        foreach (var category in categories)
+        {
+            var visible = !shareTraceHiddenCategories.Contains(category);
+            if (ImGui.Checkbox($"{category}##ShareTraceCategory{category}", ref visible))
+            {
+                if (visible)
+                {
+                    shareTraceHiddenCategories.Remove(category);
+                }
+                else
+                {
+                    shareTraceHiddenCategories.Add(category);
+                }
+            }
+        }
+
+        ImGui.EndCombo();
+    }
+
     private void DrawTraceSnapshotSummary(string label, TofuInspectorSnapshot? snapshot)
     {
         if (snapshot is null)
@@ -431,7 +496,7 @@ public sealed class ConfigWindow : Window, IDisposable
         foreach (var dataSet in snapshot.DataSets)
         {
             var objectCount = dataSet.Boards.Sum(board => board.ObjectCount);
-            ImGui.TextUnformatted($"{dataSet.Name}: {dataSet.Boards.Count:N0} captured board(s), total {dataSet.Total:N0}, max {dataSet.MaxCount:N0}, objects {objectCount:N0}");
+            ImGui.TextUnformatted($"{dataSet.Name}: {dataSet.Folders.Count:N0} folder(s), {dataSet.Boards.Count:N0} board(s), total {dataSet.Total:N0}, max {dataSet.MaxCount:N0}, objects {objectCount:N0}");
         }
 
         ImGui.TreePop();
@@ -467,9 +532,15 @@ public sealed class ConfigWindow : Window, IDisposable
     private void DrawTofuDataSet(TofuInspectorDataSet dataSet)
     {
         var boards = dataSet.Boards.Where(MatchesTofuBoard).ToList();
-        if (!ImGui.TreeNode($"{dataSet.Name} ({boards.Count:N0}/{dataSet.Boards.Count:N0}, total {dataSet.Total:N0}, max {dataSet.MaxCount:N0})###Tofu{dataSet.Name}"))
+        var folders = dataSet.Folders.Where(MatchesTofuFolder).ToList();
+        if (!ImGui.TreeNode($"{dataSet.Name} ({folders.Count:N0}/{dataSet.Folders.Count:N0} folders, {boards.Count:N0}/{dataSet.Boards.Count:N0} boards, total {dataSet.Total:N0}, max {dataSet.MaxCount:N0})###Tofu{dataSet.Name}"))
         {
             return;
+        }
+
+        if (folders.Count > 0)
+        {
+            DrawTofuFolders(dataSet.Name, folders);
         }
 
         if (boards.Count == 0)
@@ -510,6 +581,38 @@ public sealed class ConfigWindow : Window, IDisposable
         foreach (var board in boards)
         {
             DrawTofuObjects(dataSet.Name, board);
+        }
+
+        ImGui.TreePop();
+    }
+
+    private void DrawTofuFolders(string dataSetName, IReadOnlyList<TofuInspectorFolder> folders)
+    {
+        if (!ImGui.TreeNode($"Folders ({folders.Count:N0})###Tofu{dataSetName}Folders"))
+        {
+            return;
+        }
+
+        if (ImGui.BeginTable($"##TofuFolders{dataSetName}", 5, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerV))
+        {
+            ImGui.TableSetupColumn("#", ImGuiTableColumnFlags.WidthStretch, 0.35f);
+            ImGui.TableSetupColumn("Valid", ImGuiTableColumnFlags.WidthStretch, 0.45f);
+            ImGui.TableSetupColumn("Is board", ImGuiTableColumnFlags.WidthStretch, 0.55f);
+            ImGui.TableSetupColumn("Name", ImGuiTableColumnFlags.WidthStretch, 1.6f);
+            ImGui.TableSetupColumn("Order", ImGuiTableColumnFlags.WidthStretch, 0.55f);
+            ImGui.TableHeadersRow();
+
+            foreach (var folder in folders)
+            {
+                ImGui.TableNextRow();
+                DrawTableText(0, folder.Index.ToString(CultureInfo.InvariantCulture));
+                DrawTableText(1, FormatBool(folder.IsValid));
+                DrawTableText(2, FormatBool(folder.IsBoard));
+                DrawTableText(3, folder.Name, wrap: true);
+                DrawTableText(4, folder.PositionInList);
+            }
+
+            ImGui.EndTable();
         }
 
         ImGui.TreePop();
@@ -781,6 +884,11 @@ public sealed class ConfigWindow : Window, IDisposable
         return MatchesFilter(board.Index.ToString(CultureInfo.InvariantCulture), board.Name, board.Folder, board.PositionInList, board.Background, board.ServerTime, string.Join(" ", board.Objects.Select(obj => obj.Text)));
     }
 
+    private bool MatchesTofuFolder(TofuInspectorFolder folder)
+    {
+        return MatchesFilter(folder.Index.ToString(CultureInfo.InvariantCulture), folder.Name, folder.PositionInList, FormatBool(folder.IsValid), FormatBool(folder.IsBoard));
+    }
+
     private bool MatchesTofuObject(TofuInspectorObject obj)
     {
         return MatchesFilter(obj.Index.ToString(CultureInfo.InvariantCulture), obj.ObjectType, obj.X, obj.Y, obj.Scale, obj.Angle, obj.Rgba, obj.Visible, obj.Locked, obj.Flags, obj.RawFlags, obj.Args, obj.Text);
@@ -818,6 +926,11 @@ public sealed class ConfigWindow : Window, IDisposable
 
     private bool MatchesShareTraceEvent(ShareTraceEvent entry)
     {
+        if (shareTraceHiddenCategories.Contains(entry.Category))
+        {
+            return false;
+        }
+
         if (shareTraceFocusedOnly && !entry.IsFocused)
         {
             return false;

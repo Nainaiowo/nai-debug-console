@@ -28,8 +28,9 @@ public sealed partial class Plugin
     private const int MaxAddonInspectorEvents = 500;
     private const int MaxAddonInspectorNodes = 500;
     private const int MaxAddonInspectorAtkValues = 128;
-    private const int MaxShareTraceEvents = 400;
+    private const int MaxShareTraceEvents = 5000;
     private const int AddonInspectorDuplicateSuppressSeconds = 3;
+    private const int MaxTofuInspectorFoldersPerDataSet = 50;
     private const int MaxTofuInspectorBoardsPerDataSet = 50;
     private const int MaxTofuInspectorObjectsPerBoard = 80;
     private const int MaxTofuInspectorTextLength = 240;
@@ -71,7 +72,7 @@ public sealed partial class Plugin
         TofuObjectType.BlackMage,
     ];
 
-    private static readonly TimeSpan ShareTraceHoverProbeInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan ShareTraceSelectionProbeInterval = TimeSpan.FromMilliseconds(100);
 
     private unsafe delegate void TofuContextMenuOptionsDelegate(AgentTofuList* agent, AtkValue* values, uint valueCount, uint code);
     private unsafe delegate TofuFolderEntry* TofuCreateFolderDelegate(TofuModule* module, TofuType type, TofuFolderEntry* folder);
@@ -106,10 +107,10 @@ public sealed partial class Plugin
     private bool tofuFunctionWatchEnabled;
     private bool shareTraceActive;
     private bool shareTraceEnabledTofuWatcher;
-    private DateTime nextShareTraceHoverProbeAtUtc = DateTime.MinValue;
+    private DateTime nextShareTraceSelectionProbeAtUtc = DateTime.MinValue;
     private DateTime shareTraceStartedAtUtc = DateTime.MinValue;
     private DateTime? shareTraceStoppedAtUtc;
-    private string? lastShareTraceHoverProbeSignature;
+    private string? lastShareTraceSelectionProbeSignature;
 
     private Hook<TofuContextMenuOptionsDelegate>? tofuContextMenuOptionsHook;
     private Hook<TofuCreateFolderDelegate>? tofuCreateFolderHook;
@@ -179,7 +180,7 @@ public sealed partial class Plugin
 
     private void UpdateDebugTools()
     {
-        CaptureShareTraceHoverProbe();
+        CaptureShareTraceSelectionProbe();
     }
 
     public void ClearDebugTools()
@@ -196,8 +197,8 @@ public sealed partial class Plugin
         shareTraceActive = false;
         shareTraceStoppedAtUtc = null;
         shareTraceStartedAtUtc = DateTime.MinValue;
-        nextShareTraceHoverProbeAtUtc = DateTime.MinValue;
-        lastShareTraceHoverProbeSignature = null;
+        nextShareTraceSelectionProbeAtUtc = DateTime.MinValue;
+        lastShareTraceSelectionProbeSignature = null;
         AddDebugLog("Debug console data cleared.");
     }
 
@@ -257,8 +258,8 @@ public sealed partial class Plugin
         shareTraceConfirmationSnapshot = null;
         shareTraceStoppedAtUtc = null;
         shareTraceStartedAtUtc = DateTime.UtcNow;
-        nextShareTraceHoverProbeAtUtc = DateTime.MinValue;
-        lastShareTraceHoverProbeSignature = null;
+        nextShareTraceSelectionProbeAtUtc = DateTime.MinValue;
+        lastShareTraceSelectionProbeSignature = null;
         shareTraceEnabledTofuWatcher = !tofuFunctionWatchEnabled;
 
         if (shareTraceEnabledTofuWatcher)
@@ -321,8 +322,8 @@ public sealed partial class Plugin
         shareTraceStartedAtUtc = DateTime.MinValue;
         shareTraceActive = false;
         shareTraceEnabledTofuWatcher = false;
-        nextShareTraceHoverProbeAtUtc = DateTime.MinValue;
-        lastShareTraceHoverProbeSignature = null;
+        nextShareTraceSelectionProbeAtUtc = DateTime.MinValue;
+        lastShareTraceSelectionProbeSignature = null;
         if (shouldDisableWatcher)
         {
             SetTofuFunctionWatchEnabled(false);
@@ -900,7 +901,7 @@ public sealed partial class Plugin
         AddDebugLog($"Tofu watcher | {functionName}: {details}");
     }
 
-    private void CaptureShareTraceHoverProbe()
+    private void CaptureShareTraceSelectionProbe()
     {
         if (!shareTraceActive || !Configuration.ShareTraceHoverProbeEnabled)
         {
@@ -908,22 +909,22 @@ public sealed partial class Plugin
         }
 
         var now = DateTime.UtcNow;
-        if (now < nextShareTraceHoverProbeAtUtc)
+        if (now < nextShareTraceSelectionProbeAtUtc)
         {
             return;
         }
 
-        nextShareTraceHoverProbeAtUtc = now + ShareTraceHoverProbeInterval;
+        nextShareTraceSelectionProbeAtUtc = now + ShareTraceSelectionProbeInterval;
 
         var addonState = FormatTofuListAddonProbe();
         var signature = addonState;
-        if (string.Equals(signature, lastShareTraceHoverProbeSignature, StringComparison.Ordinal))
+        if (string.Equals(signature, lastShareTraceSelectionProbeSignature, StringComparison.Ordinal))
         {
             return;
         }
 
-        lastShareTraceHoverProbeSignature = signature;
-        AddShareTraceEvent("Hover", "TofuList state", addonState, true);
+        lastShareTraceSelectionProbeSignature = signature;
+        AddShareTraceEvent("Selection", "TofuList state", addonState, true);
     }
 
     private string FormatTofuListAddonProbe()
@@ -1076,6 +1077,14 @@ public sealed partial class Plugin
                 dataSet.Name,
                 dataSet.Total,
                 dataSet.MaxCount,
+                folders = dataSet.Folders.Select(folder => new
+                {
+                    folder.Index,
+                    folder.IsValid,
+                    folder.IsBoard,
+                    folder.Name,
+                    folder.PositionInList,
+                }).ToList(),
                 boards = dataSet.Boards.Select(board => new
                 {
                     board.Index,
@@ -1169,14 +1178,35 @@ public sealed partial class Plugin
     {
         if (data is null)
         {
-            return new TofuInspectorDataSet(name, 0, 0, []);
+            return new TofuInspectorDataSet(name, 0, 0, [], []);
         }
 
+        var folders = data->Folders;
         var boards = data->Boards;
         var maxCount = SafeTofuInt(data->MaxCount);
         var total = SafeTofuInt(data->Total);
+        var folderCaptureCount = Math.Clamp(Math.Max(total, maxCount), 0, Math.Min(folders.Length, MaxTofuInspectorFoldersPerDataSet));
         var captureCount = Math.Clamp(Math.Max(total, maxCount), 0, Math.Min(boards.Length, MaxTofuInspectorBoardsPerDataSet));
+        var capturedFolders = new List<TofuInspectorFolder>();
         var capturedBoards = new List<TofuInspectorBoard>();
+
+        for (var i = 0; i < folderCaptureCount; i++)
+        {
+            try
+            {
+                var folder = folders[i];
+                if (!folder.IsValid && string.IsNullOrWhiteSpace(folder.NameString))
+                {
+                    continue;
+                }
+
+                capturedFolders.Add(CaptureTofuInspectorFolder(i, folder));
+            }
+            catch (Exception ex)
+            {
+                capturedFolders.Add(new TofuInspectorFolder(i, false, false, $"Unreadable folder: {ex.Message}", "-"));
+            }
+        }
 
         for (var i = 0; i < captureCount; i++)
         {
@@ -1196,7 +1226,17 @@ public sealed partial class Plugin
             }
         }
 
-        return new TofuInspectorDataSet(name, total, maxCount, capturedBoards);
+        return new TofuInspectorDataSet(name, total, maxCount, capturedFolders, capturedBoards);
+    }
+
+    private static TofuInspectorFolder CaptureTofuInspectorFolder(int index, TofuFolderEntry folder)
+    {
+        return new TofuInspectorFolder(
+            index,
+            folder.IsValid,
+            folder.IsBoard,
+            string.IsNullOrWhiteSpace(folder.NameString) ? "-" : TrimTofuInspectorText(folder.NameString) ?? "-",
+            FormatTofuInspectorValue(folder.PositionInList));
     }
 
     private static unsafe TofuInspectorBoard CaptureTofuInspectorBoard(int index, TofuBoardEntry board)

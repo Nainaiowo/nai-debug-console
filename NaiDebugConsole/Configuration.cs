@@ -6,7 +6,7 @@ namespace NaiDebugConsole;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
 
     public bool ShowWindow { get; set; } = true;
 
@@ -24,7 +24,7 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool TofuFunctionWatchEnabled { get; set; }
 
-    public bool ShareTraceCaptureOnlyFilteredAddons { get; set; } = true;
+    public bool ShareTraceCaptureOnlyFilteredAddons { get; set; }
 
     public bool ShareTraceAutoSnapshotConfirmationDialog { get; set; } = true;
 

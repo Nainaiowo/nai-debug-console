@@ -63,7 +63,15 @@ public sealed record TofuInspectorDataSet(
     string Name,
     int Total,
     int MaxCount,
+    IReadOnlyList<TofuInspectorFolder> Folders,
     IReadOnlyList<TofuInspectorBoard> Boards);
+
+public sealed record TofuInspectorFolder(
+    int Index,
+    bool IsValid,
+    bool IsBoard,
+    string Name,
+    string PositionInList);
 
 public sealed record TofuInspectorBoard(
     int Index,

@@ -260,6 +260,12 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void NormalizeConfiguration()
     {
+        if (Configuration.Version < 2)
+        {
+            Configuration.ShareTraceCaptureOnlyFilteredAddons = false;
+            Configuration.Version = 2;
+        }
+
         Configuration.SnapshotIntervalMs = Math.Clamp(Configuration.SnapshotIntervalMs, 100, 2_000);
         Configuration.MaxLogFileSizeMb = Math.Clamp(Configuration.MaxLogFileSizeMb, 5, 100);
         Configuration.MaxLogFiles = Math.Clamp(Configuration.MaxLogFiles, 2, 30);
