@@ -71,6 +71,8 @@ public sealed partial class Plugin
         TofuObjectType.BlackMage,
     ];
 
+    private static readonly TimeSpan ShareTraceHoverProbeInterval = TimeSpan.FromMilliseconds(100);
+
     private unsafe delegate void TofuContextMenuOptionsDelegate(AgentTofuList* agent, AtkValue* values, uint valueCount, uint code);
     private unsafe delegate TofuFolderEntry* TofuCreateFolderDelegate(TofuModule* module, TofuType type, TofuFolderEntry* folder);
     private unsafe delegate TofuBoardEntry* TofuCreateBoardDelegate(TofuModule* module, TofuType type, TofuBoardEntry* board, bool notInFolder);
@@ -104,8 +106,10 @@ public sealed partial class Plugin
     private bool tofuFunctionWatchEnabled;
     private bool shareTraceActive;
     private bool shareTraceEnabledTofuWatcher;
+    private DateTime nextShareTraceHoverProbeAtUtc = DateTime.MinValue;
     private DateTime shareTraceStartedAtUtc = DateTime.MinValue;
     private DateTime? shareTraceStoppedAtUtc;
+    private string? lastShareTraceHoverProbeSignature;
 
     private Hook<TofuContextMenuOptionsDelegate>? tofuContextMenuOptionsHook;
     private Hook<TofuCreateFolderDelegate>? tofuCreateFolderHook;
@@ -173,6 +177,11 @@ public sealed partial class Plugin
         UnregisterAddonInspectorLifecycleListeners();
     }
 
+    private void UpdateDebugTools()
+    {
+        CaptureShareTraceHoverProbe();
+    }
+
     public void ClearDebugTools()
     {
         debugLogEntries.Clear();
@@ -187,6 +196,8 @@ public sealed partial class Plugin
         shareTraceActive = false;
         shareTraceStoppedAtUtc = null;
         shareTraceStartedAtUtc = DateTime.MinValue;
+        nextShareTraceHoverProbeAtUtc = DateTime.MinValue;
+        lastShareTraceHoverProbeSignature = null;
         AddDebugLog("Debug console data cleared.");
     }
 
@@ -221,6 +232,12 @@ public sealed partial class Plugin
         SaveConfiguration();
     }
 
+    public void SetShareTraceHoverProbeEnabled(bool enabled)
+    {
+        Configuration.ShareTraceHoverProbeEnabled = enabled;
+        SaveConfiguration();
+    }
+
     public void SetShareTraceAddonFilter(string filter)
     {
         Configuration.ShareTraceAddonFilter = NormalizeTraceFilter(filter);
@@ -240,6 +257,8 @@ public sealed partial class Plugin
         shareTraceConfirmationSnapshot = null;
         shareTraceStoppedAtUtc = null;
         shareTraceStartedAtUtc = DateTime.UtcNow;
+        nextShareTraceHoverProbeAtUtc = DateTime.MinValue;
+        lastShareTraceHoverProbeSignature = null;
         shareTraceEnabledTofuWatcher = !tofuFunctionWatchEnabled;
 
         if (shareTraceEnabledTofuWatcher)
@@ -302,6 +321,8 @@ public sealed partial class Plugin
         shareTraceStartedAtUtc = DateTime.MinValue;
         shareTraceActive = false;
         shareTraceEnabledTofuWatcher = false;
+        nextShareTraceHoverProbeAtUtc = DateTime.MinValue;
+        lastShareTraceHoverProbeSignature = null;
         if (shouldDisableWatcher)
         {
             SetTofuFunctionWatchEnabled(false);
@@ -345,6 +366,7 @@ public sealed partial class Plugin
                 {
                     Configuration.ShareTraceCaptureOnlyFilteredAddons,
                     Configuration.ShareTraceAutoSnapshotConfirmationDialog,
+                    Configuration.ShareTraceHoverProbeEnabled,
                     Configuration.ShareTraceAddonFilter,
                     tofuFunctionWatchEnabled,
                 },
@@ -876,6 +898,62 @@ public sealed partial class Plugin
 
         AddShareTraceEvent("Tofu", functionName, details, true);
         AddDebugLog($"Tofu watcher | {functionName}: {details}");
+    }
+
+    private void CaptureShareTraceHoverProbe()
+    {
+        if (!shareTraceActive || !Configuration.ShareTraceHoverProbeEnabled)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (now < nextShareTraceHoverProbeAtUtc)
+        {
+            return;
+        }
+
+        nextShareTraceHoverProbeAtUtc = now + ShareTraceHoverProbeInterval;
+
+        var addonState = FormatTofuListAddonProbe();
+        var signature = addonState;
+        if (string.Equals(signature, lastShareTraceHoverProbeSignature, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastShareTraceHoverProbeSignature = signature;
+        AddShareTraceEvent("Hover", "TofuList state", addonState, true);
+    }
+
+    private string FormatTofuListAddonProbe()
+    {
+        try
+        {
+            var addon = GameGui.GetAddonByName("TofuList");
+            if (addon.Address == 0 || addon.IsNull)
+            {
+                return "TofuList addon not found";
+            }
+
+            var snapshot = CaptureAddonInspectorSnapshot("TofuList", addon);
+            var visibleText = snapshot.Nodes
+                .Where(node => node.IsVisible && !string.IsNullOrWhiteSpace(node.Text))
+                .Take(8)
+                .Select(node => $"{node.Index}:{node.NodeId}:{node.Text}")
+                .ToList();
+            var atkValues = snapshot.AtkValues
+                .Where(value => !string.IsNullOrWhiteSpace(value.Value) && value.Value != "-")
+                .Take(8)
+                .Select(value => $"{value.Index}:{value.Type}:{value.Value}")
+                .ToList();
+
+            return $"ready {snapshot.IsReady}, visible {snapshot.IsVisible}, nodes {snapshot.NodeCount}, texts [{string.Join(" | ", visibleText)}], values [{string.Join(" | ", atkValues)}]";
+        }
+        catch (Exception ex)
+        {
+            return $"TofuList addon probe failed: {ex.Message}";
+        }
     }
 
     private void AddShareTraceAddonEvent(AddonEvent eventType, string addonName, nint address, bool isReady, bool isVisible)

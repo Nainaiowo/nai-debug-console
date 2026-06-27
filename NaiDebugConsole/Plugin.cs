@@ -272,6 +272,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private void OnFrameworkUpdate(IFramework framework)
     {
         FlushPendingRecords();
+        UpdateDebugTools();
 
         if (!Configuration.CapturePartySnapshots || !ShouldCapture())
         {

@@ -329,6 +329,17 @@ public sealed class ConfigWindow : Window, IDisposable
             plugin.SetShareTraceAutoSnapshotConfirmationDialog(snapshotDialog);
         }
 
+        var hoverProbe = configuration.ShareTraceHoverProbeEnabled;
+        if (ImGui.Checkbox("Probe board/folder hover state", ref hoverProbe))
+        {
+            plugin.SetShareTraceHoverProbeEnabled(hoverProbe);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Samples Strategy Board list state during share trace and records changes while hovering or selecting boards and folders.");
+        }
+
         ImGui.SetNextItemWidth(MathF.Max(320.0f, ImGui.GetContentRegionAvail().X * 0.55f));
         if (ImGui.InputText("Addon capture terms##ShareTraceAddonFilter", ref shareTraceAddonFilter, 256))
         {
