@@ -234,6 +234,12 @@ public sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.SameLine();
+        if (ImGui.Button("Create 31-char text board"))
+        {
+            tofuCreateResult = plugin.CreateDebugTofuLongTextBoard();
+        }
+
+        ImGui.SameLine();
         DrawDebugFilter();
 
         if (!string.IsNullOrWhiteSpace(tofuCreateResult))

@@ -36,6 +36,8 @@ public sealed partial class Plugin
     private const int MaxTofuInspectorTextLength = 240;
     private const int MaxTofuTextObjectLength = 30;
     private const string DebugTofuTestBoardName = "Pineapple";
+    private const string DebugTofuLongTextBoardName = "NDC_TEXT_31";
+    private const string DebugTofuLongTextValue = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1";
     private const int TofuHiddenTextX = 5120;
     private const int TofuHiddenTextY = 3840;
 
@@ -111,6 +113,7 @@ public sealed partial class Plugin
     private DateTime shareTraceStartedAtUtc = DateTime.MinValue;
     private DateTime? shareTraceStoppedAtUtc;
     private string? lastShareTraceSelectionProbeSignature;
+    private string? lastShareTraceConfirmationPrompt;
 
     private Hook<TofuContextMenuOptionsDelegate>? tofuContextMenuOptionsHook;
     private Hook<TofuCreateFolderDelegate>? tofuCreateFolderHook;
@@ -260,6 +263,7 @@ public sealed partial class Plugin
         shareTraceStartedAtUtc = DateTime.UtcNow;
         nextShareTraceSelectionProbeAtUtc = DateTime.MinValue;
         lastShareTraceSelectionProbeSignature = null;
+        lastShareTraceConfirmationPrompt = null;
         shareTraceEnabledTofuWatcher = !tofuFunctionWatchEnabled;
 
         if (shareTraceEnabledTofuWatcher)
@@ -324,6 +328,7 @@ public sealed partial class Plugin
         shareTraceEnabledTofuWatcher = false;
         nextShareTraceSelectionProbeAtUtc = DateTime.MinValue;
         lastShareTraceSelectionProbeSignature = null;
+        lastShareTraceConfirmationPrompt = null;
         if (shouldDisableWatcher)
         {
             SetTofuFunctionWatchEnabled(false);
@@ -492,6 +497,57 @@ public sealed partial class Plugin
         {
             Log.Warning(ex, "Could not create Strategy Board test board.");
             return $"Could not create test board: {ex.Message}";
+        }
+    }
+
+    public unsafe string CreateDebugTofuLongTextBoard()
+    {
+        try
+        {
+            var module = TofuModule.Instance();
+            if (module is null)
+            {
+                return "Strategy Board module was not available yet.";
+            }
+
+            if (module->IsFull(TofuType.Saved, TofuItem.Board))
+            {
+                return "Saved Strategy Board list is full. Delete a saved board first.";
+            }
+
+            var board = new TofuBoardEntry
+            {
+                NameString = DebugTofuLongTextBoardName,
+                Background = 0,
+                NumberOfObjects = 1,
+            };
+
+            var objects = board.Objects;
+            objects[0] = new TofuShortObject
+            {
+                ObjectType = TofuObjectType.Text,
+                PosX = TofuHiddenTextX,
+                PosY = TofuHiddenTextY,
+                Scale = 100,
+                Angle = 0,
+                Flags = TofuObjectFlags.IsVisible,
+                TextString = DebugTofuLongTextValue,
+            };
+
+            var created = module->CreateBoard(TofuType.Saved, &board, true);
+            if (created is null)
+            {
+                return "The game did not create the 31-character text board.";
+            }
+
+            tofuInspectorSnapshot = CaptureTofuInspectorSnapshotInternal();
+            AddDebugLog($"Created Strategy Board named {DebugTofuLongTextBoardName} with requested text length {DebugTofuLongTextValue.Length:N0}.");
+            return $"Created saved Strategy Board {DebugTofuLongTextBoardName} with requested text length {DebugTofuLongTextValue.Length:N0}.";
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Could not create 31-character Strategy Board test board.");
+            return $"Could not create 31-character text board: {ex.Message}";
         }
     }
 
@@ -995,6 +1051,13 @@ public sealed partial class Plugin
                 addonName,
                 $"Snapshot captured with {shareTraceConfirmationSnapshot.AtkValues.Count:N0} AtkValue(s) and {shareTraceConfirmationSnapshot.NodeCount:N0} node(s).",
                 true);
+
+            var promptAnalysis = AnalyzeStrategyShareConfirmationPrompt(shareTraceConfirmationSnapshot);
+            if (promptAnalysis is not null && !string.Equals(promptAnalysis.Prompt, lastShareTraceConfirmationPrompt, StringComparison.Ordinal))
+            {
+                lastShareTraceConfirmationPrompt = promptAnalysis.Prompt;
+                AddShareTraceEvent("Confirmation", "Prompt parse", FormatStrategySharePromptAnalysis(promptAnalysis), true);
+            }
         }
         catch (Exception ex)
         {
@@ -1002,6 +1065,85 @@ public sealed partial class Plugin
             Log.Debug(ex, "Could not capture Strategy share confirmation dialog snapshot.");
         }
     }
+
+    private static StrategySharePromptAnalysis? AnalyzeStrategyShareConfirmationPrompt(AddonInspectorSnapshot snapshot)
+    {
+        var promptValue = FindStrategySharePromptValue(snapshot);
+        if (promptValue is null)
+        {
+            return null;
+        }
+
+        var prompt = promptValue.Value;
+        return new StrategySharePromptAnalysis(
+            prompt,
+            $"SelectYesno AtkValue[{promptValue.Index}]",
+            GetStrategySharePromptTargetKind(prompt),
+            TryParseQuotedPromptName(prompt));
+    }
+
+    private static AddonInspectorValue? FindStrategySharePromptValue(AddonInspectorSnapshot snapshot)
+    {
+        var directPrompt = snapshot.AtkValues.FirstOrDefault(value =>
+            value.Index == 0 &&
+            IsStrategySharePromptText(value.Value));
+        if (directPrompt is not null)
+        {
+            return directPrompt;
+        }
+
+        return snapshot.AtkValues.FirstOrDefault(value =>
+            value.Type.Contains("String", StringComparison.OrdinalIgnoreCase) &&
+            IsStrategySharePromptText(value.Value));
+    }
+
+    private static bool IsStrategySharePromptText(string value)
+    {
+        return value.Contains("strategy board", StringComparison.OrdinalIgnoreCase) &&
+            value.Contains("share", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetStrategySharePromptTargetKind(string prompt)
+    {
+        return prompt.Contains("folder", StringComparison.OrdinalIgnoreCase)
+            ? "folder"
+            : "board";
+    }
+
+    private static string FormatStrategySharePromptAnalysis(StrategySharePromptAnalysis analysis)
+    {
+        var parsed = string.IsNullOrWhiteSpace(analysis.TargetName)
+            ? $"{analysis.TargetKind} name was not parsed"
+            : $"{analysis.TargetKind} '{analysis.TargetName}'";
+
+        return $"Source: {analysis.Source}. Rule: read that prompt, then take the text between quote marks. Parsed: {parsed}. Raw prompt: {analysis.Prompt}";
+    }
+
+    private static string? TryParseQuotedPromptName(string prompt)
+    {
+        return TryExtractBetween(prompt, '\u201C', '\u201D') ??
+            TryExtractBetween(prompt, '"', '"') ??
+            TryExtractBetween(prompt, '\'', '\'');
+    }
+
+    private static string? TryExtractBetween(string value, char openQuote, char closeQuote)
+    {
+        var open = value.IndexOf(openQuote);
+        var close = value.LastIndexOf(closeQuote);
+        if (open < 0 || close <= open)
+        {
+            return null;
+        }
+
+        var result = value[(open + 1)..close].Trim();
+        return result.Length == 0 ? null : result;
+    }
+
+    private sealed record StrategySharePromptAnalysis(
+        string Prompt,
+        string Source,
+        string TargetKind,
+        string? TargetName);
 
     private void AddShareTraceEvent(string category, string name, string details, bool isFocused)
     {
