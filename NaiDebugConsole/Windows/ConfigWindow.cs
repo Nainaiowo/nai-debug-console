@@ -18,6 +18,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private string debugTextFilter = string.Empty;
     private string shareTraceAddonFilter = string.Empty;
     private string shareTraceEventFilter = string.Empty;
+    private string shareTraceSaveResult = string.Empty;
     private string tofuCreateResult = string.Empty;
     private bool addonInspectorHideCommonNoise = true;
     private bool shareTraceFocusedOnly = true;
@@ -292,6 +293,27 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.Button("Clear trace"))
         {
             plugin.ClearShareTrace();
+            shareTraceSaveResult = string.Empty;
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Save trace bundle"))
+        {
+            shareTraceSaveResult = plugin.SaveShareTraceToFile();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Open trace folder"))
+        {
+            plugin.OpenShareTraceFolder();
+        }
+
+        var savedPath = string.IsNullOrWhiteSpace(shareTraceSaveResult)
+            ? plugin.LastShareTraceSavePath
+            : shareTraceSaveResult;
+        if (!string.IsNullOrWhiteSpace(savedPath))
+        {
+            ImGui.TextDisabled($"Saved trace: {savedPath}");
         }
 
         ImGui.Spacing();

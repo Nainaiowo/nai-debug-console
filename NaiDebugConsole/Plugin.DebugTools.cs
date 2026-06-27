@@ -13,9 +13,12 @@ using FFXIVClientStructs.FFXIV.Client.UI.Shell;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 namespace NaiDebugConsole;
 
@@ -95,6 +98,7 @@ public sealed partial class Plugin
     private TofuInspectorSnapshot? shareTraceStartSnapshot;
     private TofuInspectorSnapshot? shareTraceEndSnapshot;
     private AddonInspectorSnapshot? shareTraceConfirmationSnapshot;
+    private string? lastShareTraceSavePath;
     private bool addonInspectorLifecycleRegistered;
     private bool debugToolsDisposed;
     private bool tofuFunctionWatchEnabled;
@@ -146,6 +150,10 @@ public sealed partial class Plugin
     public TofuInspectorSnapshot? ShareTraceEndSnapshot => shareTraceEndSnapshot;
 
     public AddonInspectorSnapshot? ShareTraceConfirmationSnapshot => shareTraceConfirmationSnapshot;
+
+    public string ShareTraceExportDirectory => Path.Combine(LogDirectory, "share-traces");
+
+    public string? LastShareTraceSavePath => lastShareTraceSavePath;
 
     private void InitializeDebugTools()
     {
@@ -289,6 +297,7 @@ public sealed partial class Plugin
         shareTraceStartSnapshot = null;
         shareTraceEndSnapshot = null;
         shareTraceConfirmationSnapshot = null;
+        lastShareTraceSavePath = null;
         shareTraceStoppedAtUtc = null;
         shareTraceStartedAtUtc = DateTime.MinValue;
         shareTraceActive = false;
@@ -299,6 +308,73 @@ public sealed partial class Plugin
         }
 
         AddDebugLog("Strategy share trace cleared.");
+    }
+
+    public string SaveShareTraceToFile()
+    {
+        try
+        {
+            Directory.CreateDirectory(ShareTraceExportDirectory);
+            var savedAtUtc = DateTime.UtcNow;
+            var fileName = $"strategy-share-trace-{savedAtUtc:yyyyMMdd-HHmmss}.json";
+            var path = Path.Combine(ShareTraceExportDirectory, fileName);
+            var events = shareTraceEvents
+                .OrderBy(entry => entry.SeenAtUtc)
+                .Select(entry => new
+                {
+                    entry.SeenAtUtc,
+                    entry.ElapsedSeconds,
+                    entry.Category,
+                    entry.Name,
+                    entry.Details,
+                    entry.IsFocused,
+                })
+                .ToList();
+
+            var payload = new
+            {
+                schemaVersion = 1,
+                kind = "strategy-share-trace-bundle",
+                pluginVersion = typeof(Plugin).Assembly.GetName().Version?.ToString() ?? "unknown",
+                savedAtUtc,
+                traceStartedAtUtc = ShareTraceStartedAtUtc,
+                traceStoppedAtUtc = shareTraceStoppedAtUtc,
+                traceActive = shareTraceActive,
+                eventCount = events.Count,
+                settings = new
+                {
+                    Configuration.ShareTraceCaptureOnlyFilteredAddons,
+                    Configuration.ShareTraceAutoSnapshotConfirmationDialog,
+                    Configuration.ShareTraceAddonFilter,
+                    tofuFunctionWatchEnabled,
+                },
+                events,
+                startStrategyBoardSnapshot = ExportTofuSnapshot(shareTraceStartSnapshot),
+                endStrategyBoardSnapshot = ExportTofuSnapshot(shareTraceEndSnapshot),
+                confirmationDialogSnapshot = ExportAddonSnapshot(shareTraceConfirmationSnapshot),
+            };
+
+            File.WriteAllText(path, JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
+            lastShareTraceSavePath = path;
+            AddDebugLog($"Saved Strategy share trace to {Path.GetFileName(path)}.");
+            return path;
+        }
+        catch (Exception ex)
+        {
+            LastError = $"Could not save share trace: {ex.Message}";
+            Log.Warning(ex, "Could not save Strategy share trace.");
+            return LastError;
+        }
+    }
+
+    public void OpenShareTraceFolder()
+    {
+        Directory.CreateDirectory(ShareTraceExportDirectory);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = ShareTraceExportDirectory,
+            UseShellExecute = true,
+        });
     }
 
     public void CaptureAddonInspectorSnapshot(string addonName)
@@ -904,6 +980,94 @@ public sealed partial class Plugin
         }
 
         return string.Join(' ', filter.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
+    private static object? ExportTofuSnapshot(TofuInspectorSnapshot? snapshot)
+    {
+        if (snapshot is null)
+        {
+            return null;
+        }
+
+        return new
+        {
+            snapshot.SeenAtUtc,
+            snapshot.Error,
+            dataSets = snapshot.DataSets.Select(dataSet => new
+            {
+                dataSet.Name,
+                dataSet.Total,
+                dataSet.MaxCount,
+                boards = dataSet.Boards.Select(board => new
+                {
+                    board.Index,
+                    board.IsValid,
+                    board.Name,
+                    board.Folder,
+                    board.PositionInList,
+                    board.ServerTime,
+                    board.Background,
+                    board.ObjectCount,
+                    objects = board.Objects.Select(obj => new
+                    {
+                        obj.Index,
+                        obj.ObjectType,
+                        obj.X,
+                        obj.Y,
+                        obj.Scale,
+                        obj.Angle,
+                        obj.Rgba,
+                        obj.Visible,
+                        obj.Locked,
+                        obj.Flags,
+                        obj.RawFlags,
+                        obj.Args,
+                        obj.Text,
+                    }).ToList(),
+                }).ToList(),
+            }).ToList(),
+        };
+    }
+
+    private static object? ExportAddonSnapshot(AddonInspectorSnapshot? snapshot)
+    {
+        if (snapshot is null)
+        {
+            return null;
+        }
+
+        return new
+        {
+            snapshot.SeenAtUtc,
+            snapshot.AddonName,
+            address = FormatPointer(snapshot.Address),
+            snapshot.IsReady,
+            snapshot.IsVisible,
+            snapshot.X,
+            snapshot.Y,
+            snapshot.Width,
+            snapshot.Height,
+            snapshot.NodeCount,
+            snapshot.Error,
+            atkValues = snapshot.AtkValues.Select(value => new
+            {
+                value.Index,
+                value.Type,
+                value.Value,
+            }).ToList(),
+            nodes = snapshot.Nodes.Select(node => new
+            {
+                node.Index,
+                node.NodeId,
+                node.NodeType,
+                node.IsVisible,
+                node.X,
+                node.Y,
+                node.Width,
+                node.Height,
+                node.Text,
+            }).ToList(),
+        };
     }
 
     private static unsafe TofuInspectorSnapshot CaptureTofuInspectorSnapshotInternal()
