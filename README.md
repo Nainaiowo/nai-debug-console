@@ -39,6 +39,6 @@ Use this when researching how the native Strategy Board share flow works.
 5. Click `Stop share trace`.
 6. Click `Save trace bundle`.
 
-The trace records addon lifecycle events, Tofu function calls, board/list selection-state changes, a start/end Strategy Board snapshot, and an automatic snapshot of the confirmation dialog when it appears. The UI can hide known/noisy categories while keeping the saved bundle broad enough to review later. Treat the output as research evidence, not as confirmed implementation truth until the trace is compared against the in-game behavior.
+The trace records addon lifecycle events, Tofu function calls, board/list selection-state changes, a start/end Strategy Board snapshot, and an automatic snapshot of the confirmation dialog when it appears. The UI shows all captured trace rows by default and can narrow the view with text search or focused-only filtering. Treat the output as research evidence, not as confirmed implementation truth until the trace is compared against the in-game behavior.
 
 Saved trace bundles are written to the plugin config folder under `logs/share-traces`.
