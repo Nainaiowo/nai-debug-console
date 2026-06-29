@@ -123,6 +123,28 @@ public sealed class ConfigWindow : Window, IDisposable
             plugin.SetCaptureActionEffects(captureActionEffects);
         }
 
+        var captureEffectResults = configuration.CaptureEffectResultPackets;
+        if (ImGui.Checkbox("Capture EffectResult packets", ref captureEffectResults))
+        {
+            plugin.SetCaptureEffectResultPackets(captureEffectResults);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Captures raw HP, shield, MP, status-result, and related-action-sequence packets when the game exposes them.");
+        }
+
+        var captureActorControl = configuration.CaptureActorControlPackets;
+        if (ImGui.Checkbox("Capture ActorControl packets", ref captureActorControl))
+        {
+            plugin.SetCaptureActorControlPackets(captureActorControl);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Captures raw actor-control events such as death, status gain/loss/update, target icons, HoTs, and DoTs when exposed.");
+        }
+
         var capturePartySnapshots = configuration.CapturePartySnapshots;
         if (ImGui.Checkbox("Capture party HP/status snapshots", ref capturePartySnapshots))
         {
@@ -138,6 +160,48 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("How often to record party HP, shields, and statuses while capture is active.");
+        }
+
+        ImGui.Separator();
+        ImGui.TextColored(EnabledColor, "Full pull recorder");
+
+        var pullRecorderEnabled = configuration.PullRecorderEnabled;
+        if (ImGui.Checkbox("Record everything visible while enabled", ref pullRecorderEnabled))
+        {
+            plugin.SetPullRecorderEnabled(pullRecorderEnabled);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Starts a fresh JSONL file when enabled, then records broad pull snapshots while the normal capture gate is open.");
+        }
+
+        var pullRecorderObjects = configuration.PullRecorderCaptureObjectTable;
+        if (ImGui.Checkbox("Include full object table snapshots", ref pullRecorderObjects))
+        {
+            plugin.SetPullRecorderCaptureObjectTable(pullRecorderObjects);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Records every visible object with position, HP/shields when available, targetability, and all exposed statuses.");
+        }
+
+        var pullRecorderAddons = configuration.PullRecorderCaptureAddonLifecycle;
+        if (ImGui.Checkbox("Include addon lifecycle events", ref pullRecorderAddons))
+        {
+            plugin.SetPullRecorderCaptureAddonLifecycle(pullRecorderAddons);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Adds addon show/hide/open/setup rows while the pull recorder is enabled.");
+        }
+
+        var pullRecorderInterval = configuration.PullRecorderSnapshotIntervalMs;
+        if (ImGui.SliderInt("Pull recorder interval (ms)", ref pullRecorderInterval, 100, 2_000))
+        {
+            plugin.SetPullRecorderSnapshotIntervalMs(pullRecorderInterval);
         }
     }
 
@@ -196,6 +260,10 @@ public sealed class ConfigWindow : Window, IDisposable
             ImGui.TextDisabled("Capture gate is closed by settings, login state, or duty filter.");
         }
 
+        ImGui.TextUnformatted($"Pull recorder: {(plugin.IsPullRecorderActive ? "active" : configuration.PullRecorderEnabled ? "waiting on capture gate" : "off")}");
+        ImGui.TextUnformatted($"EffectResult hook: {(plugin.EffectResultHookEnabled ? "enabled" : "not enabled")}");
+        ImGui.TextUnformatted($"ActorControl hook: {(plugin.ActorControlHookEnabled ? "enabled" : "not enabled")}");
+
         if (!string.IsNullOrWhiteSpace(plugin.LastError))
         {
             ImGui.TextColored(WarningColor, $"Last error: {plugin.LastError}");
@@ -231,12 +299,6 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.Button("Create test board"))
         {
             tofuCreateResult = plugin.CreateDebugTofuTestBoard();
-        }
-
-        ImGui.SameLine();
-        if (ImGui.Button("Create 31-char text board"))
-        {
-            tofuCreateResult = plugin.CreateDebugTofuLongTextBoard();
         }
 
         ImGui.SameLine();

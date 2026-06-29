@@ -2,7 +2,7 @@
 
 Nai Debug Console is a local Dalamud plugin for capturing combat-debug data to JSONL files and inspecting Strategy Board/UI internals.
 
-It records structured log-message events, action-effect events, and optional party HP/status snapshots so the data can be compared against Better Deaths behavior.
+It records structured log-message events, action-effect events, raw packet events, optional party HP/status snapshots, and broad pull-recorder snapshots so the data can be compared against Better Deaths behavior.
 
 ## Commands
 
@@ -20,7 +20,10 @@ Each line is one JSON object. Send the generated `.jsonl` file when we need to a
 
 - Combat JSONL logger
 - ActionEffect capture
+- EffectResult packet capture
+- ActorControl packet capture
 - Party HP/status snapshots
+- Full pull recorder with object-table, status, position, HP/shield, condition, and addon-lifecycle snapshots
 - Addon lifecycle event list
 - Addon node and AtkValue snapshots
 - Strategy Board shared/saved folder, board, and object inspector
@@ -42,3 +45,17 @@ Use this when researching how the native Strategy Board share flow works.
 The trace records addon lifecycle events, Tofu function calls, board/list selection-state changes, a start/end Strategy Board snapshot, and an automatic snapshot of the confirmation dialog when it appears. The UI shows all captured trace rows by default and can narrow the view with text search or focused-only filtering. Treat the output as research evidence, not as confirmed implementation truth until the trace is compared against the in-game behavior.
 
 Saved trace bundles are written to the plugin config folder under `logs/share-traces`.
+
+## Full Pull Recorder
+
+Use this when researching fight mechanics that may come from statuses, action effects, actor-control packets, or visible world state.
+
+1. Open `/ndc`.
+2. Go to `Logger`.
+3. Keep `Capture enabled` on.
+4. Enable `Record everything visible while enabled`.
+5. Leave `Include full object table snapshots`, `Capture EffectResult packets`, and `Capture ActorControl packets` on unless the log becomes too large.
+6. Run the pull, then turn the recorder off.
+7. Open the log folder and use the newest `nai-debug-console-*.jsonl` file.
+
+The recorder starts a fresh JSONL file when enabled. It records broad snapshots while the normal capture gate is open, so the `Capture only while bound by duty` setting still applies.

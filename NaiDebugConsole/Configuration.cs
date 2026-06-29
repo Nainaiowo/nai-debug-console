@@ -6,7 +6,7 @@ namespace NaiDebugConsole;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 2;
+    public int Version { get; set; } = 3;
 
     public bool ShowWindow { get; set; } = true;
 
@@ -20,7 +20,17 @@ public sealed class Configuration : IPluginConfiguration
 
     public bool CaptureActionEffects { get; set; } = true;
 
+    public bool CaptureEffectResultPackets { get; set; } = true;
+
+    public bool CaptureActorControlPackets { get; set; } = true;
+
     public bool CapturePartySnapshots { get; set; } = true;
+
+    public bool PullRecorderEnabled { get; set; }
+
+    public bool PullRecorderCaptureObjectTable { get; set; } = true;
+
+    public bool PullRecorderCaptureAddonLifecycle { get; set; } = true;
 
     public bool TofuFunctionWatchEnabled { get; set; }
 
@@ -33,6 +43,8 @@ public sealed class Configuration : IPluginConfiguration
     public string ShareTraceAddonFilter { get; set; } = "tofu strategy board notification selectyes selectyesno contextmenu addoncontextsub";
 
     public int SnapshotIntervalMs { get; set; } = 250;
+
+    public int PullRecorderSnapshotIntervalMs { get; set; } = 250;
 
     public int MaxLogFileSizeMb { get; set; } = 25;
 

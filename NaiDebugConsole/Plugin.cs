@@ -19,6 +19,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using LuminaAction = Lumina.Excel.Sheets.Action;
 
@@ -30,11 +31,59 @@ public sealed partial class Plugin : IDalamudPlugin
     private const int LogSchemaVersion = 1;
     private const int MaxPendingRecords = 5_000;
     private const int MaxRecordsFlushedPerFrame = 1_000;
+    private const int MaxEffectResultEntries = 4;
+    private const string ActorControlSignature = "E8 ?? ?? ?? ?? 0F B7 0B 83 E9 64";
+    private const string EffectResultSignature = "48 8B C4 44 88 40 18 89 48 08";
     private static readonly TimeSpan MinimumSnapshotInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan MinimumPullRecorderSnapshotInterval = TimeSpan.FromMilliseconds(100);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = false,
     };
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private unsafe struct EffectResultPacket
+    {
+        public uint Unknown1;
+        public uint RelatedActionSequence;
+        public uint ActorId;
+        public uint CurrentHp;
+        public uint MaxHp;
+        public ushort CurrentMp;
+        public ushort Unknown3;
+        public byte DamageShield;
+        public byte EffectCount;
+        public ushort Unknown6;
+        public fixed byte Effects[64];
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private struct EffectResultStatusEntry
+    {
+        public byte EffectIndex;
+        public byte Unknown1;
+        public ushort EffectId;
+        public ushort StackCount;
+        public ushort Unknown3;
+        public float Duration;
+        public uint SourceActorId;
+    }
+
+    private delegate void ProcessPacketEffectResultDelegate(uint targetId, IntPtr actionIntegrityData, byte isReplay);
+
+    private delegate void ProcessPacketActorControlDelegate(
+        uint entityId,
+        uint category,
+        uint param1,
+        uint param2,
+        uint param3,
+        uint param4,
+        uint param5,
+        uint param6,
+        uint param7,
+        uint param8,
+        ulong targetId,
+        byte param9);
 
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
@@ -54,14 +103,20 @@ public sealed partial class Plugin : IDalamudPlugin
     private readonly Queue<object> pendingRecords = new();
     private readonly Dictionary<uint, string> actionNameCache = new();
     private readonly Dictionary<uint, string> statusNameCache = new();
+    private readonly Dictionary<uint, uint> statusIconCache = new();
     private readonly Dictionary<uint, string> territoryNameCache = new();
     private Hook<ActionEffectHandler.Delegates.Receive>? actionEffectHook;
+    private Hook<ProcessPacketEffectResultDelegate>? effectResultHook;
+    private Hook<ProcessPacketActorControlDelegate>? actorControlHook;
     private DateTime sessionStartedAtUtc = DateTime.UtcNow;
     private DateTime nextSnapshotAtUtc = DateTime.MinValue;
+    private DateTime nextPullRecorderSnapshotAtUtc = DateTime.MinValue;
     private string? currentLogFilePath;
     private long totalEntriesWritten;
     private long currentFileEntriesWritten;
     private long droppedPendingRecords;
+    private bool effectResultHookEnabled;
+    private bool actorControlHookEnabled;
 
     public Configuration Configuration { get; }
 
@@ -92,6 +147,12 @@ public sealed partial class Plugin : IDalamudPlugin
 
     public bool IsCaptureGateOpen => ShouldCapture();
 
+    public bool IsPullRecorderActive => Configuration.PullRecorderEnabled && ShouldCapture();
+
+    public bool EffectResultHookEnabled => effectResultHookEnabled;
+
+    public bool ActorControlHookEnabled => actorControlHookEnabled;
+
     public unsafe Plugin()
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
@@ -118,6 +179,37 @@ public sealed partial class Plugin : IDalamudPlugin
             ActionEffectHandler.MemberFunctionPointers.Receive,
             OnReceiveActionEffect);
         actionEffectHook.Enable();
+
+        try
+        {
+            effectResultHook = GameInteropProvider.HookFromSignature<ProcessPacketEffectResultDelegate>(
+                EffectResultSignature,
+                OnProcessPacketEffectResult);
+            effectResultHook.Enable();
+            effectResultHookEnabled = true;
+        }
+        catch (Exception ex)
+        {
+            effectResultHookEnabled = false;
+            effectResultHook = null;
+            Log.Warning(ex, "Nai Debug Console EffectResult hook could not be enabled.");
+        }
+
+        try
+        {
+            actorControlHook = GameInteropProvider.HookFromSignature<ProcessPacketActorControlDelegate>(
+                ActorControlSignature,
+                OnProcessPacketActorControl);
+            actorControlHook.Enable();
+            actorControlHookEnabled = true;
+        }
+        catch (Exception ex)
+        {
+            actorControlHookEnabled = false;
+            actorControlHook = null;
+            Log.Warning(ex, "Nai Debug Console ActorControl hook could not be enabled.");
+        }
+
         InitializeDebugTools();
 
         StartNewLogFile("plugin-loaded");
@@ -129,6 +221,8 @@ public sealed partial class Plugin : IDalamudPlugin
         FlushPendingRecords(int.MaxValue);
 
         actionEffectHook?.Dispose();
+        effectResultHook?.Dispose();
+        actorControlHook?.Dispose();
         PluginInterface.UiBuilder.OpenConfigUi -= OpenMainUi;
         PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
         PluginInterface.UiBuilder.Draw -= windowSystem.Draw;
@@ -184,15 +278,75 @@ public sealed partial class Plugin : IDalamudPlugin
         SaveConfiguration();
     }
 
+    public void SetCaptureEffectResultPackets(bool enabled)
+    {
+        Configuration.CaptureEffectResultPackets = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetCaptureActorControlPackets(bool enabled)
+    {
+        Configuration.CaptureActorControlPackets = enabled;
+        SaveConfiguration();
+    }
+
     public void SetCapturePartySnapshots(bool enabled)
     {
         Configuration.CapturePartySnapshots = enabled;
         SaveConfiguration();
     }
 
+    public void SetPullRecorderEnabled(bool enabled)
+    {
+        if (enabled == Configuration.PullRecorderEnabled)
+        {
+            return;
+        }
+
+        Configuration.PullRecorderEnabled = enabled;
+        SaveConfiguration();
+        nextPullRecorderSnapshotAtUtc = DateTime.MinValue;
+        if (enabled)
+        {
+            StartNewLogFile("pull-recorder-enabled");
+        }
+
+        WriteRecord("pull-recorder-toggle", new
+        {
+            enabled,
+            captureGateOpen = ShouldCapture(),
+            objectTable = Configuration.PullRecorderCaptureObjectTable,
+            addonLifecycle = Configuration.PullRecorderCaptureAddonLifecycle,
+            snapshotIntervalMs = Configuration.PullRecorderSnapshotIntervalMs,
+        }, ignoreCaptureGate: true);
+
+        if (!enabled)
+        {
+            FlushPendingRecords(int.MaxValue);
+        }
+    }
+
+    public void SetPullRecorderCaptureObjectTable(bool enabled)
+    {
+        Configuration.PullRecorderCaptureObjectTable = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetPullRecorderCaptureAddonLifecycle(bool enabled)
+    {
+        Configuration.PullRecorderCaptureAddonLifecycle = enabled;
+        SaveConfiguration();
+    }
+
     public void SetSnapshotIntervalMs(int intervalMs)
     {
         Configuration.SnapshotIntervalMs = Math.Clamp(intervalMs, 100, 2_000);
+        SaveConfiguration();
+    }
+
+    public void SetPullRecorderSnapshotIntervalMs(int intervalMs)
+    {
+        Configuration.PullRecorderSnapshotIntervalMs = Math.Clamp(intervalMs, 100, 2_000);
         SaveConfiguration();
     }
 
@@ -265,8 +419,18 @@ public sealed partial class Plugin : IDalamudPlugin
             Configuration.ShareTraceCaptureOnlyFilteredAddons = false;
             Configuration.Version = 2;
         }
+        if (Configuration.Version < 3)
+        {
+            Configuration.CaptureEffectResultPackets = true;
+            Configuration.CaptureActorControlPackets = true;
+            Configuration.PullRecorderCaptureObjectTable = true;
+            Configuration.PullRecorderCaptureAddonLifecycle = true;
+            Configuration.PullRecorderSnapshotIntervalMs = 250;
+            Configuration.Version = 3;
+        }
 
         Configuration.SnapshotIntervalMs = Math.Clamp(Configuration.SnapshotIntervalMs, 100, 2_000);
+        Configuration.PullRecorderSnapshotIntervalMs = Math.Clamp(Configuration.PullRecorderSnapshotIntervalMs, 100, 2_000);
         Configuration.MaxLogFileSizeMb = Math.Clamp(Configuration.MaxLogFileSizeMb, 5, 100);
         Configuration.MaxLogFiles = Math.Clamp(Configuration.MaxLogFiles, 2, 30);
         Configuration.ShareTraceAddonFilter = string.IsNullOrWhiteSpace(Configuration.ShareTraceAddonFilter)
@@ -279,6 +443,7 @@ public sealed partial class Plugin : IDalamudPlugin
     {
         FlushPendingRecords();
         UpdateDebugTools();
+        UpdatePullRecorder();
 
         if (!Configuration.CapturePartySnapshots || !ShouldCapture())
         {
@@ -301,6 +466,36 @@ public sealed partial class Plugin : IDalamudPlugin
         WriteRecord("party-snapshot", new
         {
             members = CapturePartyMembers(),
+        });
+    }
+
+    private void UpdatePullRecorder()
+    {
+        if (!Configuration.PullRecorderEnabled || !ShouldCapture())
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (now < nextPullRecorderSnapshotAtUtc)
+        {
+            return;
+        }
+
+        var interval = TimeSpan.FromMilliseconds(Configuration.PullRecorderSnapshotIntervalMs);
+        if (interval < MinimumPullRecorderSnapshotInterval)
+        {
+            interval = MinimumPullRecorderSnapshotInterval;
+        }
+
+        nextPullRecorderSnapshotAtUtc = now + interval;
+        WriteRecord("pull-recorder-snapshot", new
+        {
+            partyMembers = CapturePartyMembers(),
+            objectTable = Configuration.PullRecorderCaptureObjectTable
+                ? CaptureObjectTableSnapshot()
+                : [],
+            activeConditions = CaptureActiveConditions(),
         });
     }
 
@@ -371,6 +566,139 @@ public sealed partial class Plugin : IDalamudPlugin
         }
 
         actionEffectHook?.Original(casterEntityId, casterPtr, targetPos, header, effects, targetEntityIds);
+    }
+
+    private unsafe void OnProcessPacketEffectResult(uint targetId, IntPtr actionIntegrityData, byte isReplay)
+    {
+        effectResultHook?.Original(targetId, actionIntegrityData, isReplay);
+
+        try
+        {
+            if (Configuration.CaptureEffectResultPackets && ShouldCapture())
+            {
+                CaptureEffectResultPacket(targetId, actionIntegrityData, isReplay);
+            }
+        }
+        catch (Exception ex)
+        {
+            LastError = $"EffectResult capture failed: {ex.Message}";
+            Log.Warning(ex, "Could not capture Nai Debug Console EffectResult packet.");
+        }
+    }
+
+    private void OnProcessPacketActorControl(
+        uint entityId,
+        uint category,
+        uint param1,
+        uint param2,
+        uint param3,
+        uint param4,
+        uint param5,
+        uint param6,
+        uint param7,
+        uint param8,
+        ulong targetId,
+        byte param9)
+    {
+        actorControlHook?.Original(entityId, category, param1, param2, param3, param4, param5, param6, param7, param8, targetId, param9);
+
+        try
+        {
+            if (Configuration.CaptureActorControlPackets && ShouldCapture())
+            {
+                CaptureActorControlPacket(entityId, category, param1, param2, param3, param4, param5, param6, param7, param8, targetId, param9);
+            }
+        }
+        catch (Exception ex)
+        {
+            LastError = $"ActorControl capture failed: {ex.Message}";
+            Log.Warning(ex, "Could not capture Nai Debug Console ActorControl packet.");
+        }
+    }
+
+    private unsafe void CaptureEffectResultPacket(uint targetId, IntPtr actionIntegrityData, byte isReplay)
+    {
+        if (actionIntegrityData == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var packet = (EffectResultPacket*)actionIntegrityData;
+        var effectCount = Math.Min(packet->EffectCount, (byte)MaxEffectResultEntries);
+        var statuses = new List<object>(effectCount);
+        var effects = (EffectResultStatusEntry*)packet->Effects;
+        for (var i = 0; i < effectCount; i++)
+        {
+            var effect = effects[i];
+            if (effect.EffectId == 0)
+            {
+                continue;
+            }
+
+            statuses.Add(new
+            {
+                index = i,
+                effectIndex = effect.EffectIndex,
+                effectId = effect.EffectId,
+                effectName = GetStatusName(effect.EffectId),
+                effectIconId = GetStatusIconId(effect.EffectId),
+                stackCount = effect.StackCount,
+                duration = effect.Duration,
+                sourceActorId = effect.SourceActorId,
+                sourceObject = CaptureGameObject(ObjectTable.SearchByEntityId(effect.SourceActorId)),
+            });
+        }
+
+        WriteRecord("effect-result", new
+        {
+            targetId,
+            targetObject = CaptureGameObject(ObjectTable.SearchByEntityId(targetId)),
+            relatedActionSequence = packet->RelatedActionSequence,
+            actorId = packet->ActorId,
+            currentHp = packet->CurrentHp,
+            maxHp = packet->MaxHp,
+            currentMp = packet->CurrentMp,
+            damageShield = packet->DamageShield,
+            effectCount = packet->EffectCount,
+            isReplay,
+            statuses,
+        });
+    }
+
+    private void CaptureActorControlPacket(
+        uint entityId,
+        uint category,
+        uint param1,
+        uint param2,
+        uint param3,
+        uint param4,
+        uint param5,
+        uint param6,
+        uint param7,
+        uint param8,
+        ulong targetId,
+        byte param9)
+    {
+        var targetEntityId = targetId <= uint.MaxValue ? (uint)targetId : 0u;
+        WriteRecord("actor-control", new
+        {
+            entityId,
+            entityObject = CaptureGameObject(ObjectTable.SearchByEntityId(entityId)),
+            category,
+            categoryName = GetActorControlCategoryName(category),
+            param1,
+            param2,
+            param3,
+            param4,
+            param5,
+            param6,
+            param7,
+            param8,
+            targetId = targetId.ToString(CultureInfo.InvariantCulture),
+            targetEntityId,
+            targetObject = targetEntityId == 0 ? null : CaptureGameObject(ObjectTable.SearchByEntityId(targetEntityId)),
+            param9,
+        });
     }
 
     private unsafe void CaptureActionEffects(
@@ -658,12 +986,61 @@ public sealed partial class Plugin : IDalamudPlugin
                 maxHp = member.MaxHP,
                 shieldPercentage = gameObject is ICharacter character ? character.ShieldPercentage : 0,
                 isDead = gameObject?.IsDead == true || (member.MaxHP > 0 && member.CurrentHP == 0),
+                position = gameObject is null
+                    ? null
+                    : new
+                    {
+                        x = gameObject.Position.X,
+                        y = gameObject.Position.Y,
+                        z = gameObject.Position.Z,
+                    },
+                rotation = gameObject?.Rotation,
                 statuses = CaptureStatuses(member.Statuses),
             });
             partyIndex++;
         }
 
         return members;
+    }
+
+    private IReadOnlyList<object> CaptureObjectTableSnapshot()
+    {
+        var objects = new List<object>();
+        foreach (var gameObject in ObjectTable)
+        {
+            if (gameObject is null || gameObject.EntityId == 0)
+            {
+                continue;
+            }
+
+            if (CaptureGameObject(gameObject) is { } snapshot)
+            {
+                objects.Add(snapshot);
+            }
+        }
+
+        return objects;
+    }
+
+    private static IReadOnlyList<string> CaptureActiveConditions()
+    {
+        var active = new List<string>();
+        foreach (var flag in Enum.GetValues<ConditionFlag>())
+        {
+            try
+            {
+                if (Condition[flag])
+                {
+                    active.Add(flag.ToString());
+                }
+            }
+            catch
+            {
+                // Some enum values can be invalid for indexing on older clients. Ignore them for debug snapshots.
+            }
+        }
+
+        return active;
     }
 
     private IReadOnlyList<object> CaptureStatuses(IEnumerable<Dalamud.Game.ClientState.Statuses.IStatus> statuses)
@@ -674,11 +1051,41 @@ public sealed partial class Plugin : IDalamudPlugin
             {
                 id = status.StatusId,
                 name = GetStatusName(status.StatusId),
+                iconId = GetStatusIconId(status.StatusId),
                 param = status.Param,
                 remainingTime = status.RemainingTime,
                 sourceId = status.SourceId,
+                source = CaptureStatusSource(status.SourceId),
             })
             .ToList();
+    }
+
+    private static object? CaptureStatusSource(uint sourceId)
+    {
+        if (sourceId == 0)
+        {
+            return null;
+        }
+
+        var sourceObject = ObjectTable.SearchByEntityId(sourceId);
+        if (sourceObject is null)
+        {
+            return new
+            {
+                entityId = sourceId,
+                name = $"Entity {sourceId:X8}",
+                found = false,
+            };
+        }
+
+        return new
+        {
+            entityId = sourceObject.EntityId,
+            objectIndex = sourceObject.ObjectIndex,
+            name = sourceObject.Name.TextValue,
+            objectKind = sourceObject.ObjectKind.ToString(),
+            found = true,
+        };
     }
 
     private object? CaptureGameObject(IGameObject? gameObject)
@@ -695,12 +1102,20 @@ public sealed partial class Plugin : IDalamudPlugin
             name = gameObject.Name.TextValue,
             objectKind = gameObject.ObjectKind.ToString(),
             baseId = gameObject.BaseId,
+            rotation = gameObject.Rotation,
             position = new
             {
                 x = gameObject.Position.X,
                 y = gameObject.Position.Y,
                 z = gameObject.Position.Z,
             },
+            battleNpc = gameObject is IBattleNpc battleNpc
+                ? new
+                {
+                    battleNpcKind = battleNpc.BattleNpcKind.ToString(),
+                    isTargetable = battleNpc.IsTargetable,
+                }
+                : null,
             character = gameObject is ICharacter character
                 ? new
                 {
@@ -816,6 +1231,43 @@ public sealed partial class Plugin : IDalamudPlugin
 
         statusNameCache[statusId] = name;
         return name;
+    }
+
+    private uint GetStatusIconId(uint statusId)
+    {
+        if (statusIconCache.TryGetValue(statusId, out var cachedIconId))
+        {
+            return cachedIconId;
+        }
+
+        var iconId = 0u;
+        try
+        {
+            var status = DataManager.GetExcelSheet<Status>()?.GetRowOrDefault(statusId);
+            iconId = status?.Icon ?? 0u;
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Could not load status icon for {StatusId}.", statusId);
+        }
+
+        statusIconCache[statusId] = iconId;
+        return iconId;
+    }
+
+    private static string GetActorControlCategoryName(uint category)
+    {
+        return category switch
+        {
+            0x0006 => "Death",
+            0x0014 => "GainEffect",
+            0x0015 => "LoseEffect",
+            0x0016 => "UpdateEffect",
+            0x0022 => "TargetIcon",
+            0x0604 => "HoT",
+            0x0605 => "DoT",
+            _ => $"Category {category:X}",
+        };
     }
 
     private string GetTerritoryName(uint territoryId)

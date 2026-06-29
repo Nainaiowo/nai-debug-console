@@ -36,8 +36,6 @@ public sealed partial class Plugin
     private const int MaxTofuInspectorTextLength = 240;
     private const int MaxTofuTextObjectLength = 30;
     private const string DebugTofuTestBoardName = "Pineapple";
-    private const string DebugTofuLongTextBoardName = "NDC_TEXT_31";
-    private const string DebugTofuLongTextValue = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1";
     private const int TofuHiddenTextX = 5120;
     private const int TofuHiddenTextY = 3840;
 
@@ -500,57 +498,6 @@ public sealed partial class Plugin
         }
     }
 
-    public unsafe string CreateDebugTofuLongTextBoard()
-    {
-        try
-        {
-            var module = TofuModule.Instance();
-            if (module is null)
-            {
-                return "Strategy Board module was not available yet.";
-            }
-
-            if (module->IsFull(TofuType.Saved, TofuItem.Board))
-            {
-                return "Saved Strategy Board list is full. Delete a saved board first.";
-            }
-
-            var board = new TofuBoardEntry
-            {
-                NameString = DebugTofuLongTextBoardName,
-                Background = 0,
-                NumberOfObjects = 1,
-            };
-
-            var objects = board.Objects;
-            objects[0] = new TofuShortObject
-            {
-                ObjectType = TofuObjectType.Text,
-                PosX = TofuHiddenTextX,
-                PosY = TofuHiddenTextY,
-                Scale = 100,
-                Angle = 0,
-                Flags = TofuObjectFlags.IsVisible,
-                TextString = DebugTofuLongTextValue,
-            };
-
-            var created = module->CreateBoard(TofuType.Saved, &board, true);
-            if (created is null)
-            {
-                return "The game did not create the 31-character text board.";
-            }
-
-            tofuInspectorSnapshot = CaptureTofuInspectorSnapshotInternal();
-            AddDebugLog($"Created Strategy Board named {DebugTofuLongTextBoardName} with requested text length {DebugTofuLongTextValue.Length:N0}.");
-            return $"Created saved Strategy Board {DebugTofuLongTextBoardName} with requested text length {DebugTofuLongTextValue.Length:N0}.";
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "Could not create 31-character Strategy Board test board.");
-            return $"Could not create 31-character text board: {ex.Message}";
-        }
-    }
-
     private void RegisterAddonInspectorLifecycleListeners()
     {
         if (addonInspectorLifecycleRegistered)
@@ -606,6 +553,20 @@ public sealed partial class Plugin
                 isKnown && addon.IsVisible));
 
             AddShareTraceAddonEvent(eventType, args.AddonName, addon.Address, isKnown && addon.IsReady, isKnown && addon.IsVisible);
+            if (Configuration.PullRecorderEnabled &&
+                Configuration.PullRecorderCaptureAddonLifecycle &&
+                ShouldCapture())
+            {
+                WriteRecord("addon-lifecycle", new
+                {
+                    eventName = eventType.ToString(),
+                    addonName = args.AddonName,
+                    address = addon.Address.ToString("X", CultureInfo.InvariantCulture),
+                    isReady = isKnown && addon.IsReady,
+                    isVisible = isKnown && addon.IsVisible,
+                });
+            }
+
             CaptureShareTraceConfirmationSnapshot(eventType, args.AddonName, addon);
 
             while (addonInspectorEvents.Count > MaxAddonInspectorEvents)
