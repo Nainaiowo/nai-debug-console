@@ -185,7 +185,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Records every visible object with position, HP/shields when available, targetability, and all exposed statuses.");
+            ImGui.SetTooltip("Records every visible object, plus smaller mechanic-candidate rows with position, targetability, lifetime, HP/shields when available, and exposed statuses.");
         }
 
         var pullRecorderAddons = configuration.PullRecorderCaptureAddonLifecycle;

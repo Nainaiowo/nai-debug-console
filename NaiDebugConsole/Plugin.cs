@@ -32,6 +32,8 @@ public sealed partial class Plugin : IDalamudPlugin
     private const int MaxPendingRecords = 5_000;
     private const int MaxRecordsFlushedPerFrame = 1_000;
     private const int MaxEffectResultEntries = 4;
+    private const int MaxMechanicCandidatesPerSnapshot = 96;
+    private const int MaxMechanicCandidateLifetimes = 512;
     private const string ActorControlSignature = "E8 ?? ?? ?? ?? 0F B7 0B 83 E9 64";
     private const string EffectResultSignature = "48 8B C4 44 88 40 18 89 48 08";
     private static readonly TimeSpan MinimumSnapshotInterval = TimeSpan.FromMilliseconds(100);
@@ -105,6 +107,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private readonly Dictionary<uint, string> statusNameCache = new();
     private readonly Dictionary<uint, uint> statusIconCache = new();
     private readonly Dictionary<uint, string> territoryNameCache = new();
+    private readonly Dictionary<uint, MechanicCandidateLifetime> mechanicCandidateLifetimes = new();
     private Hook<ActionEffectHandler.Delegates.Receive>? actionEffectHook;
     private Hook<ProcessPacketEffectResultDelegate>? effectResultHook;
     private Hook<ProcessPacketActorControlDelegate>? actorControlHook;
@@ -118,6 +121,31 @@ public sealed partial class Plugin : IDalamudPlugin
     private long droppedPendingRecords;
     private bool effectResultHookEnabled;
     private bool actorControlHookEnabled;
+
+    private sealed class MechanicCandidateLifetime
+    {
+        public DateTime FirstSeenAtUtc { get; init; }
+
+        public DateTime LastSeenAtUtc { get; set; }
+
+        public string Name { get; set; } = string.Empty;
+
+        public string ObjectKind { get; set; } = string.Empty;
+
+        public uint BaseId { get; set; }
+
+        public Vector3 FirstPosition { get; init; }
+
+        public Vector3 LastPosition { get; set; }
+
+        public float MaxDistanceFromFirst { get; set; }
+
+        public int SampleCount { get; set; }
+
+        public HashSet<string> Reasons { get; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private sealed record MechanicCandidateSnapshot(int Score, object Payload);
 
     public Configuration Configuration { get; }
 
@@ -311,6 +339,7 @@ public sealed partial class Plugin : IDalamudPlugin
         Configuration.PullRecorderEnabled = enabled;
         SaveConfiguration();
         nextPullRecorderSnapshotAtUtc = DateTime.MinValue;
+        mechanicCandidateLifetimes.Clear();
         if (enabled)
         {
             StartNewLogFile("pull-recorder-enabled");
@@ -597,14 +626,26 @@ public sealed partial class Plugin : IDalamudPlugin
         }
 
         nextPullRecorderSnapshotAtUtc = now + interval;
+        IReadOnlyList<object> objectTable = Configuration.PullRecorderCaptureObjectTable
+            ? CaptureObjectTableSnapshot()
+            : Array.Empty<object>();
+        IReadOnlyList<object> mechanicCandidates = Configuration.PullRecorderCaptureObjectTable
+            ? CaptureMechanicCandidateSnapshots(now)
+            : Array.Empty<object>();
+        IReadOnlyList<object> mechanicCandidateLifetimes = Configuration.PullRecorderCaptureObjectTable
+            ? CaptureMechanicCandidateLifetimeSummaries(now)
+            : Array.Empty<object>();
+
         WriteRecord("pull-recorder-snapshot", new
         {
             partyMembers = CapturePartyMembers(),
-            objectTable = Configuration.PullRecorderCaptureObjectTable
-                ? CaptureObjectTableSnapshot()
-                : [],
+            objectTable,
+            mechanicCandidates,
+            mechanicCandidateLifetimes,
             activeConditions = CaptureActiveConditions(),
         });
+
+        PruneMechanicCandidateLifetimes(now);
     }
 
     private void OnLogMessage(ILogMessage message)
@@ -1128,6 +1169,306 @@ public sealed partial class Plugin : IDalamudPlugin
         }
 
         return objects;
+    }
+
+    private IReadOnlyList<object> CaptureMechanicCandidateSnapshots(DateTime now)
+    {
+        var candidates = new List<MechanicCandidateSnapshot>();
+        foreach (var gameObject in ObjectTable)
+        {
+            if (gameObject is null || gameObject.EntityId == 0)
+            {
+                continue;
+            }
+
+            if (TryCaptureMechanicCandidate(gameObject, now, out var candidate))
+            {
+                candidates.Add(candidate);
+            }
+        }
+
+        return candidates
+            .OrderByDescending(candidate => candidate.Score)
+            .Take(MaxMechanicCandidatesPerSnapshot)
+            .Select(candidate => candidate.Payload)
+            .ToList();
+    }
+
+    private bool TryCaptureMechanicCandidate(IGameObject gameObject, DateTime now, out MechanicCandidateSnapshot candidate)
+    {
+        candidate = default!;
+
+        var objectKind = gameObject.ObjectKind.ToString();
+        if (objectKind.Equals("Player", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var name = gameObject.Name.TextValue;
+        var lowerName = name.ToLowerInvariant();
+        var reasons = new List<string>();
+        var score = 0;
+        var isKnownMechanicName = lowerName.Contains("black hole", StringComparison.OrdinalIgnoreCase) ||
+            lowerName.Contains("tower", StringComparison.OrdinalIgnoreCase) ||
+            lowerName.Contains("meteor", StringComparison.OrdinalIgnoreCase) ||
+            lowerName.Contains("aoe", StringComparison.OrdinalIgnoreCase);
+        var isBattleNpc = gameObject is IBattleNpc;
+        var isEventObject = objectKind.Contains("Event", StringComparison.OrdinalIgnoreCase);
+        if (!isBattleNpc && !isEventObject && !isKnownMechanicName)
+        {
+            return false;
+        }
+
+        if (gameObject is IBattleNpc battleNpc)
+        {
+            reasons.Add("battle-npc");
+            score += 30;
+
+            if (!battleNpc.IsTargetable)
+            {
+                reasons.Add("untargetable-battle-npc");
+                score += 18;
+            }
+
+            var battleNpcKind = battleNpc.BattleNpcKind.ToString();
+            if (!string.IsNullOrWhiteSpace(battleNpcKind) &&
+                !battleNpcKind.Equals("None", StringComparison.OrdinalIgnoreCase))
+            {
+                reasons.Add($"battle-npc-kind:{battleNpcKind}");
+                score += 8;
+            }
+        }
+
+        if (isEventObject)
+        {
+            reasons.Add("event-object");
+            score += 24;
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            reasons.Add("unnamed-object");
+            score += 14;
+        }
+        else
+        {
+            reasons.Add("named-object");
+            score += 6;
+        }
+
+        if (isKnownMechanicName)
+        {
+            reasons.Add("known-mechanic-name");
+            score += 40;
+        }
+
+        if (gameObject.BaseId != 0)
+        {
+            reasons.Add("has-base-id");
+            score += 4;
+        }
+
+        var distanceToLocalPlayer = CalculateDistanceToLocalPlayer(gameObject.Position);
+        var nearestPartyDistance = CalculateNearestPartyDistance(gameObject.Position);
+        if (distanceToLocalPlayer is <= 60.0f || nearestPartyDistance is <= 60.0f)
+        {
+            reasons.Add("near-player-or-party");
+            score += 10;
+        }
+
+        if (score == 0)
+        {
+            return false;
+        }
+
+        var lifetime = UpdateMechanicCandidateLifetime(gameObject, now, objectKind, name, reasons);
+        candidate = new MechanicCandidateSnapshot(score, new
+        {
+            seenAtUtc = now,
+            score,
+            candidateReasons = reasons,
+            entityId = gameObject.EntityId,
+            objectIndex = gameObject.ObjectIndex,
+            name,
+            objectKind,
+            baseId = gameObject.BaseId,
+            rotation = gameObject.Rotation,
+            position = new
+            {
+                x = gameObject.Position.X,
+                y = gameObject.Position.Y,
+                z = gameObject.Position.Z,
+            },
+            distanceToLocalPlayer,
+            nearestPartyDistance,
+            lifetime = new
+            {
+                lifetime.FirstSeenAtUtc,
+                lifetime.LastSeenAtUtc,
+                durationSeconds = Math.Round((lifetime.LastSeenAtUtc - lifetime.FirstSeenAtUtc).TotalSeconds, 3),
+                lifetime.SampleCount,
+                maxDistanceFromFirst = Math.Round(lifetime.MaxDistanceFromFirst, 3),
+                firstPosition = new
+                {
+                    x = lifetime.FirstPosition.X,
+                    y = lifetime.FirstPosition.Y,
+                    z = lifetime.FirstPosition.Z,
+                },
+                lastPosition = new
+                {
+                    x = lifetime.LastPosition.X,
+                    y = lifetime.LastPosition.Y,
+                    z = lifetime.LastPosition.Z,
+                },
+                reasonsSeen = lifetime.Reasons.OrderBy(reason => reason, StringComparer.OrdinalIgnoreCase).ToList(),
+            },
+            battleNpc = gameObject is IBattleNpc capturedBattleNpc
+                ? new
+                {
+                    battleNpcKind = capturedBattleNpc.BattleNpcKind.ToString(),
+                    isTargetable = capturedBattleNpc.IsTargetable,
+                }
+                : null,
+            character = gameObject is ICharacter character
+                ? new
+                {
+                    currentHp = character.CurrentHp,
+                    maxHp = character.MaxHp,
+                    shieldPercentage = character.ShieldPercentage,
+                    shieldHp = CalculateShieldHp(gameObject, character.MaxHp),
+                    isDead = character.IsDead || character.CurrentHp == 0,
+                }
+                : null,
+            statuses = gameObject is IBattleChara battleChara ? CaptureStatuses(battleChara.StatusList) : [],
+        });
+        return true;
+    }
+
+    private MechanicCandidateLifetime UpdateMechanicCandidateLifetime(
+        IGameObject gameObject,
+        DateTime now,
+        string objectKind,
+        string name,
+        IReadOnlyList<string> reasons)
+    {
+        if (!mechanicCandidateLifetimes.TryGetValue(gameObject.EntityId, out var lifetime))
+        {
+            lifetime = new MechanicCandidateLifetime
+            {
+                FirstSeenAtUtc = now,
+                LastSeenAtUtc = now,
+                Name = name,
+                ObjectKind = objectKind,
+                BaseId = gameObject.BaseId,
+                FirstPosition = gameObject.Position,
+                LastPosition = gameObject.Position,
+                SampleCount = 0,
+            };
+            mechanicCandidateLifetimes[gameObject.EntityId] = lifetime;
+        }
+
+        lifetime.LastSeenAtUtc = now;
+        lifetime.Name = name;
+        lifetime.ObjectKind = objectKind;
+        lifetime.BaseId = gameObject.BaseId;
+        lifetime.LastPosition = gameObject.Position;
+        lifetime.SampleCount++;
+        lifetime.MaxDistanceFromFirst = Math.Max(
+            lifetime.MaxDistanceFromFirst,
+            Vector3.Distance(lifetime.FirstPosition, gameObject.Position));
+
+        foreach (var reason in reasons)
+        {
+            lifetime.Reasons.Add(reason);
+        }
+
+        return lifetime;
+    }
+
+    private IReadOnlyList<object> CaptureMechanicCandidateLifetimeSummaries(DateTime now)
+    {
+        return mechanicCandidateLifetimes
+            .OrderByDescending(pair => pair.Value.LastSeenAtUtc)
+            .Take(MaxMechanicCandidateLifetimes)
+            .Select(pair => new
+            {
+                entityId = pair.Key,
+                pair.Value.Name,
+                pair.Value.ObjectKind,
+                pair.Value.BaseId,
+                pair.Value.FirstSeenAtUtc,
+                pair.Value.LastSeenAtUtc,
+                durationSeconds = Math.Round((pair.Value.LastSeenAtUtc - pair.Value.FirstSeenAtUtc).TotalSeconds, 3),
+                staleSeconds = Math.Round((now - pair.Value.LastSeenAtUtc).TotalSeconds, 3),
+                pair.Value.SampleCount,
+                maxDistanceFromFirst = Math.Round(pair.Value.MaxDistanceFromFirst, 3),
+                firstPosition = new
+                {
+                    x = pair.Value.FirstPosition.X,
+                    y = pair.Value.FirstPosition.Y,
+                    z = pair.Value.FirstPosition.Z,
+                },
+                lastPosition = new
+                {
+                    x = pair.Value.LastPosition.X,
+                    y = pair.Value.LastPosition.Y,
+                    z = pair.Value.LastPosition.Z,
+                },
+                reasonsSeen = pair.Value.Reasons.OrderBy(reason => reason, StringComparer.OrdinalIgnoreCase).ToList(),
+            })
+            .ToList();
+    }
+
+    private void PruneMechanicCandidateLifetimes(DateTime now)
+    {
+        foreach (var staleEntityId in mechanicCandidateLifetimes
+                     .Where(pair => now - pair.Value.LastSeenAtUtc > TimeSpan.FromMinutes(5))
+                     .Select(pair => pair.Key)
+                     .ToList())
+        {
+            mechanicCandidateLifetimes.Remove(staleEntityId);
+        }
+
+        if (mechanicCandidateLifetimes.Count <= MaxMechanicCandidateLifetimes)
+        {
+            return;
+        }
+
+        foreach (var oldEntityId in mechanicCandidateLifetimes
+                     .OrderBy(pair => pair.Value.LastSeenAtUtc)
+                     .Take(mechanicCandidateLifetimes.Count - MaxMechanicCandidateLifetimes)
+                     .Select(pair => pair.Key)
+                     .ToList())
+        {
+            mechanicCandidateLifetimes.Remove(oldEntityId);
+        }
+    }
+
+    private static float? CalculateDistanceToLocalPlayer(Vector3 position)
+    {
+        var localPlayer = ObjectTable.LocalPlayer;
+        return localPlayer is null ? null : Vector3.Distance(localPlayer.Position, position);
+    }
+
+    private static float? CalculateNearestPartyDistance(Vector3 position)
+    {
+        float? nearestDistance = null;
+        foreach (var member in PartyList)
+        {
+            var gameObject = member.GameObject;
+            if (gameObject is null)
+            {
+                continue;
+            }
+
+            var distance = Vector3.Distance(gameObject.Position, position);
+            if (nearestDistance is null || distance < nearestDistance.Value)
+            {
+                nearestDistance = distance;
+            }
+        }
+
+        return nearestDistance;
     }
 
     private static IReadOnlyList<string> CaptureActiveConditions()

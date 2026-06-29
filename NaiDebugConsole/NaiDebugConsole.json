@@ -2,7 +2,7 @@
   "Author": "Nainaiowo",
   "Name": "Nai Debug Console",
   "InternalName": "NaiDebugConsole",
-  "DownloadCount": 12,
+  "DownloadCount": 15,
   "Punchline": "Local debug tools for troubleshooting.",
   "Description": "Local debug console for combat logs, addon snapshots, and Strategy Board inspection.",
   "RepoUrl": "https://github.com/Nainaiowo/nai-debug-console",
