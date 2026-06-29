@@ -112,6 +112,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private DateTime nextSnapshotAtUtc = DateTime.MinValue;
     private DateTime nextPullRecorderSnapshotAtUtc = DateTime.MinValue;
     private string? currentLogFilePath;
+    private string? lastCaptureSavePath;
     private long totalEntriesWritten;
     private long currentFileEntriesWritten;
     private long droppedPendingRecords;
@@ -122,9 +123,13 @@ public sealed partial class Plugin : IDalamudPlugin
 
     public string LogDirectory => Path.Combine(PluginInterface.ConfigDirectory.FullName, "logs");
 
+    public string CaptureExportDirectory => Path.Combine(LogDirectory, "captures");
+
     public string? CurrentLogFilePath => currentLogFilePath;
 
     public string CurrentLogFileDisplay => currentLogFilePath is null ? "No file yet" : Path.GetFileName(currentLogFilePath);
+
+    public string? LastCaptureSavePath => lastCaptureSavePath;
 
     public long TotalEntriesWritten => totalEntriesWritten;
 
@@ -381,6 +386,109 @@ public sealed partial class Plugin : IDalamudPlugin
         Process.Start(new ProcessStartInfo
         {
             FileName = LogDirectory,
+            UseShellExecute = true,
+        });
+    }
+
+    public string SaveCurrentCaptureBundle()
+    {
+        WriteRecord("capture-export", new
+        {
+            reason = "manual-save",
+            sourceLogFile = currentLogFilePath is null ? null : Path.GetFileName(currentLogFilePath),
+        }, ignoreCaptureGate: true);
+
+        try
+        {
+            string sourcePath;
+            long copiedEntries;
+            long sessionEntries;
+            long droppedRecords;
+            string captureDirectory;
+            var savedAtUtc = DateTime.UtcNow;
+
+            lock (fileLock)
+            {
+                FlushPendingRecordsLocked(int.MaxValue);
+                if (currentLogFilePath is null || !File.Exists(currentLogFilePath))
+                {
+                    CreateNewLogFileLocked("capture-save-created-file");
+                    FlushPendingRecordsLocked(int.MaxValue);
+                }
+
+                sourcePath = currentLogFilePath!;
+                copiedEntries = currentFileEntriesWritten;
+                sessionEntries = totalEntriesWritten;
+                droppedRecords = droppedPendingRecords;
+
+                Directory.CreateDirectory(CaptureExportDirectory);
+                captureDirectory = Path.Combine(CaptureExportDirectory, $"capture-{savedAtUtc:yyyyMMdd-HHmmss}");
+                Directory.CreateDirectory(captureDirectory);
+                File.Copy(sourcePath, Path.Combine(captureDirectory, "records.jsonl"), overwrite: true);
+            }
+
+            var metadata = new
+            {
+                schemaVersion = 1,
+                kind = "nai-debug-console-capture-bundle",
+                pluginVersion = typeof(Plugin).Assembly.GetName().Version?.ToString() ?? "unknown",
+                savedAtUtc,
+                sourceLogFile = Path.GetFileName(sourcePath),
+                copiedEntries,
+                sessionEntries,
+                droppedRecords,
+                currentTerritoryId = ClientState.TerritoryType,
+                currentTerritoryName = GetTerritoryName(ClientState.TerritoryType),
+                inDuty = IsInDuty(),
+                inCombat = Condition[ConditionFlag.InCombat],
+                hooks = new
+                {
+                    actionEffect = actionEffectHook is not null,
+                    effectResult = effectResultHookEnabled,
+                    actorControl = actorControlHookEnabled,
+                    tofuFunctionWatch = DebugTofuFunctionWatchEnabled,
+                },
+                settings = new
+                {
+                    Configuration.CaptureEnabled,
+                    Configuration.CaptureOnlyInDuty,
+                    Configuration.CaptureLogMessages,
+                    Configuration.IncludeFormattedLogMessages,
+                    Configuration.CaptureActionEffects,
+                    Configuration.CaptureEffectResultPackets,
+                    Configuration.CaptureActorControlPackets,
+                    Configuration.CapturePartySnapshots,
+                    Configuration.PullRecorderEnabled,
+                    Configuration.PullRecorderCaptureObjectTable,
+                    Configuration.PullRecorderCaptureAddonLifecycle,
+                    Configuration.SnapshotIntervalMs,
+                    Configuration.PullRecorderSnapshotIntervalMs,
+                    Configuration.MaxLogFileSizeMb,
+                    Configuration.MaxLogFiles,
+                },
+            };
+
+            File.WriteAllText(
+                Path.Combine(captureDirectory, "capture-info.json"),
+                JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
+
+            lastCaptureSavePath = captureDirectory;
+            return captureDirectory;
+        }
+        catch (Exception ex)
+        {
+            LastError = $"Could not save capture bundle: {ex.Message}";
+            Log.Warning(ex, "Could not save Nai Debug Console capture bundle.");
+            return LastError;
+        }
+    }
+
+    public void OpenCaptureExportFolder()
+    {
+        Directory.CreateDirectory(CaptureExportDirectory);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = CaptureExportDirectory,
             UseShellExecute = true,
         });
     }

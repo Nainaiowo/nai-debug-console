@@ -17,6 +17,7 @@ public sealed class ConfigWindow : Window, IDisposable
     private string addonInspectorName = string.Empty;
     private string addonInspectorEventFilter = string.Empty;
     private string debugTextFilter = string.Empty;
+    private string captureSaveResult = string.Empty;
     private string shareTraceAddonFilter = string.Empty;
     private string shareTraceEventFilter = string.Empty;
     private string shareTraceSaveResult = string.Empty;
@@ -222,6 +223,7 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.Button("Start new file"))
         {
             plugin.StartNewLogFile();
+            captureSaveResult = string.Empty;
         }
 
         ImGui.SameLine();
@@ -239,6 +241,30 @@ public sealed class ConfigWindow : Window, IDisposable
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip("Ctrl+click to delete stored Nai Debug Console files.");
+        }
+
+        if (ImGui.Button("Save current capture"))
+        {
+            captureSaveResult = plugin.SaveCurrentCaptureBundle();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Flushes the current logger file and copies it into a timestamped capture bundle with metadata.");
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Open capture folder"))
+        {
+            plugin.OpenCaptureExportFolder();
+        }
+
+        var savedPath = string.IsNullOrWhiteSpace(captureSaveResult)
+            ? plugin.LastCaptureSavePath
+            : captureSaveResult;
+        if (!string.IsNullOrWhiteSpace(savedPath))
+        {
+            ImGui.TextDisabled($"Saved capture: {savedPath}");
         }
     }
 
