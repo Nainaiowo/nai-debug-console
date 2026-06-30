@@ -315,7 +315,7 @@ public sealed class ConfigWindow : Window, IDisposable
 
         if (ImGui.IsItemHovered())
         {
-            ImGui.SetTooltip("Flushes the current logger file and copies it into a timestamped capture bundle with metadata.");
+            ImGui.SetTooltip("Flushes the logger and saves all files from the current capture session into a timestamped bundle with metadata.");
         }
 
         ImGui.SameLine();

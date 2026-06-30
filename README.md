@@ -16,6 +16,8 @@ Logs are written to the plugin config folder under `logs`.
 
 Each line is one JSON object. Send the generated `.jsonl` file when we need to audit structured log streams, action effects, or UI/Strategy Board behavior.
 
+Use `Save current capture` after a test run when the session may have rotated across multiple log files. The saved bundle combines every file from the current capture session into one `records.jsonl` with metadata in `capture-info.json`.
+
 ## Tools
 
 - Combat JSONL logger
@@ -56,6 +58,7 @@ Use this when researching fight mechanics that may come from statuses, action ef
 4. Enable `Record everything visible while enabled`.
 5. Leave `Include full object table snapshots`, `Capture EffectResult packets`, and `Capture ActorControl packets` on unless the log becomes too large.
 6. Run the pull, then turn the recorder off.
-7. Open the log folder and use the newest `nai-debug-console-*.jsonl` file.
+7. Click `Save current capture`.
+8. Open the capture folder and use the newest capture bundle.
 
 The recorder starts a fresh JSONL file when enabled. It records broad snapshots while the normal capture gate is open, so the `Capture only while bound by duty` setting still applies.

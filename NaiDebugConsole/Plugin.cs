@@ -102,6 +102,7 @@ public sealed partial class Plugin : IDalamudPlugin
     private readonly ConfigWindow configWindow;
     private readonly object fileLock = new();
     private readonly Queue<object> pendingRecords = new();
+    private readonly List<string> currentSessionLogFilePaths = new();
     private readonly Dictionary<uint, string> actionNameCache = new();
     private readonly Dictionary<uint, string> statusNameCache = new();
     private readonly Dictionary<uint, uint> statusIconCache = new();
@@ -457,8 +458,11 @@ public sealed partial class Plugin : IDalamudPlugin
 
         try
         {
-            string sourcePath;
-            long copiedEntries;
+            string currentSourcePath;
+            List<string> sourcePaths;
+            List<string> missingSourceLogFiles;
+            List<string> sourceLogFiles;
+            long copiedEntries = 0;
             long sessionEntries;
             long droppedRecords;
             string captureDirectory;
@@ -473,15 +477,47 @@ public sealed partial class Plugin : IDalamudPlugin
                     FlushPendingRecordsLocked(int.MaxValue);
                 }
 
-                sourcePath = currentLogFilePath!;
-                copiedEntries = currentFileEntriesWritten;
+                currentSourcePath = currentLogFilePath!;
+                sourcePaths = currentSessionLogFilePaths
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Where(File.Exists)
+                    .ToList();
+                if (sourcePaths.Count == 0)
+                {
+                    sourcePaths.Add(currentSourcePath);
+                }
+
+                missingSourceLogFiles = currentSessionLogFilePaths
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Where(path => !File.Exists(path))
+                    .Select(Path.GetFileName)
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Cast<string>()
+                    .ToList();
+                sourceLogFiles = sourcePaths
+                    .Select(Path.GetFileName)
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Cast<string>()
+                    .ToList();
                 sessionEntries = totalEntriesWritten;
                 droppedRecords = droppedPendingRecords;
 
                 Directory.CreateDirectory(CaptureExportDirectory);
                 captureDirectory = Path.Combine(CaptureExportDirectory, $"capture-{savedAtUtc:yyyyMMdd-HHmmss}");
                 Directory.CreateDirectory(captureDirectory);
-                File.Copy(sourcePath, Path.Combine(captureDirectory, "records.jsonl"), overwrite: true);
+
+                var recordsPath = Path.Combine(captureDirectory, "records.jsonl");
+                using var writer = new StreamWriter(recordsPath, append: false);
+                foreach (var sourcePath in sourcePaths)
+                {
+                    foreach (var line in File.ReadLines(sourcePath))
+                    {
+                        writer.WriteLine(line);
+                        copiedEntries++;
+                    }
+                }
             }
 
             var metadata = new
@@ -490,9 +526,12 @@ public sealed partial class Plugin : IDalamudPlugin
                 kind = "nai-debug-console-capture-bundle",
                 pluginVersion = typeof(Plugin).Assembly.GetName().Version?.ToString() ?? "unknown",
                 savedAtUtc,
-                sourceLogFile = Path.GetFileName(sourcePath),
+                sourceLogFile = Path.GetFileName(currentSourcePath),
+                sourceLogFiles,
+                copiedFileCount = sourceLogFiles.Count,
                 copiedEntries,
                 sessionEntries,
+                missingSourceLogFiles,
                 droppedRecords,
                 currentTerritoryId = ClientState.TerritoryType,
                 currentTerritoryName = GetTerritoryName(ClientState.TerritoryType),
@@ -966,9 +1005,15 @@ public sealed partial class Plugin : IDalamudPlugin
     private void CreateNewLogFileLocked(string reason)
     {
         Directory.CreateDirectory(LogDirectory);
+        if (!string.Equals(reason, "size-rotation", StringComparison.Ordinal))
+        {
+            currentSessionLogFilePaths.Clear();
+        }
+
         sessionStartedAtUtc = DateTime.UtcNow;
         currentFileEntriesWritten = 0;
         currentLogFilePath = Path.Combine(LogDirectory, $"nai-debug-console-{sessionStartedAtUtc:yyyyMMdd-HHmmss}.jsonl");
+        currentSessionLogFilePaths.Add(currentLogFilePath);
         var json = JsonSerializer.Serialize(CreateEnvelope("session-start", new
         {
             reason,
@@ -1011,13 +1056,16 @@ public sealed partial class Plugin : IDalamudPlugin
 
     private void PruneLogFilesLocked()
     {
+        var currentSessionFiles = currentSessionLogFilePaths
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var files = Directory.GetFiles(LogDirectory, "nai-debug-console-*.jsonl")
             .Select(path => new FileInfo(path))
             .OrderByDescending(file => file.CreationTimeUtc)
             .ThenByDescending(file => file.Name, StringComparer.Ordinal)
             .ToList();
 
-        foreach (var staleFile in files.Skip(Configuration.MaxLogFiles))
+        foreach (var staleFile in files.Where(file => !currentSessionFiles.Contains(file.FullName)).Skip(Configuration.MaxLogFiles))
         {
             try
             {
