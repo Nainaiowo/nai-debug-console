@@ -124,6 +124,71 @@ public sealed class ConfigWindow : Window, IDisposable
             plugin.SetCaptureActionEffects(captureActionEffects);
         }
 
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Captured through ECommons now, instead of NDC's old duplicate ActionEffect hook.");
+        }
+
+        ImGui.Separator();
+        ImGui.TextColored(EnabledColor, "ECommons capture");
+
+        var captureECommonsVfx = configuration.CaptureECommonsVfxEvents;
+        if (ImGui.Checkbox("Capture VFX events", ref captureECommonsVfx))
+        {
+            plugin.SetCaptureECommonsVfxEvents(captureECommonsVfx);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Captures actor and static VFX create/run/destroy events, plus active VFX snapshots in the pull recorder.");
+        }
+
+        var captureMapEffects = configuration.CaptureECommonsMapEffects;
+        if (ImGui.Checkbox("Capture map effects", ref captureMapEffects))
+        {
+            plugin.SetCaptureECommonsMapEffects(captureMapEffects);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Captures ECommons MapEffect hook values. Useful when looking for arenas, floor effects, and encounter visuals.");
+        }
+
+        var captureDirectorUpdates = configuration.CaptureECommonsDirectorUpdates;
+        if (ImGui.Checkbox("Capture director updates", ref captureDirectorUpdates))
+        {
+            plugin.SetCaptureECommonsDirectorUpdates(captureDirectorUpdates);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Captures broad duty/director update values exposed by ECommons.");
+        }
+
+        var captureObjectLife = configuration.CaptureECommonsObjectLifeEvents;
+        if (ImGui.Checkbox("Capture object creation", ref captureObjectLife))
+        {
+            plugin.SetCaptureECommonsObjectLifeEvents(captureObjectLife);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Captures when new game objects appear, then snapshots the object if the object table can resolve it.");
+        }
+
+        var captureTethers = configuration.CaptureECommonsTethers;
+        if (ImGui.Checkbox("Capture tether data in snapshots", ref captureTethers))
+        {
+            plugin.SetCaptureECommonsTethers(captureTethers);
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Adds exposed tether IDs and pair information to party snapshots.");
+        }
+
+        ImGui.Separator();
+
         var captureEffectResults = configuration.CaptureEffectResultPackets;
         if (ImGui.Checkbox("Capture EffectResult packets", ref captureEffectResults))
         {
@@ -287,8 +352,13 @@ public sealed class ConfigWindow : Window, IDisposable
         }
 
         ImGui.TextUnformatted($"Pull recorder: {(plugin.IsPullRecorderActive ? "active" : configuration.PullRecorderEnabled ? "waiting on capture gate" : "off")}");
+        ImGui.TextUnformatted($"ActionEffect hook: {(plugin.ECommonsActionEffectHookEnabled ? "enabled through ECommons" : "not enabled")}");
         ImGui.TextUnformatted($"EffectResult hook: {(plugin.EffectResultHookEnabled ? "enabled" : "not enabled")}");
         ImGui.TextUnformatted($"ActorControl hook: {(plugin.ActorControlHookEnabled ? "enabled" : "not enabled")}");
+        ImGui.TextUnformatted($"ECommons VFX hooks: {(plugin.ECommonsVfxHookEnabled ? "enabled" : "not enabled")}");
+        ImGui.TextUnformatted($"ECommons MapEffect hook: {(plugin.ECommonsMapEffectHookEnabled ? "enabled" : "not enabled")}");
+        ImGui.TextUnformatted($"ECommons DirectorUpdate hook: {(plugin.ECommonsDirectorUpdateHookEnabled ? "enabled" : "not enabled")}");
+        ImGui.TextUnformatted($"ECommons ObjectLife hook: {(plugin.ECommonsObjectLifeHookEnabled ? "enabled" : "not enabled")}");
 
         if (!string.IsNullOrWhiteSpace(plugin.LastError))
         {

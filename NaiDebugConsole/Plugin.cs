@@ -9,8 +9,7 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
-using FFXIVClientStructs.FFXIV.Client.Game.Character;
-using FFXIVClientStructs.FFXIV.Client.Game.Object;
+using ECommons;
 using Lumina.Excel.Sheets;
 using System;
 using System.Collections.Generic;
@@ -108,7 +107,6 @@ public sealed partial class Plugin : IDalamudPlugin
     private readonly Dictionary<uint, uint> statusIconCache = new();
     private readonly Dictionary<uint, string> territoryNameCache = new();
     private readonly Dictionary<uint, MechanicCandidateLifetime> mechanicCandidateLifetimes = new();
-    private Hook<ActionEffectHandler.Delegates.Receive>? actionEffectHook;
     private Hook<ProcessPacketEffectResultDelegate>? effectResultHook;
     private Hook<ProcessPacketActorControlDelegate>? actorControlHook;
     private DateTime sessionStartedAtUtc = DateTime.UtcNow;
@@ -208,10 +206,9 @@ public sealed partial class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi += OpenMainUi;
         PluginInterface.UiBuilder.OpenConfigUi += OpenMainUi;
 
-        actionEffectHook = GameInteropProvider.HookFromAddress<ActionEffectHandler.Delegates.Receive>(
-            ActionEffectHandler.MemberFunctionPointers.Receive,
-            OnReceiveActionEffect);
-        actionEffectHook.Enable();
+        ECommonsMain.ReducedLogging = true;
+        ECommonsMain.Init(PluginInterface, this, Module.VfxTracking, Module.ObjectLife, Module.ObjectFunctions);
+        InitializeECommonsCapture();
 
         try
         {
@@ -253,9 +250,10 @@ public sealed partial class Plugin : IDalamudPlugin
         WriteRecord("session-end", new { reason = "plugin-unloaded" }, ignoreCaptureGate: true);
         FlushPendingRecords(int.MaxValue);
 
-        actionEffectHook?.Dispose();
         effectResultHook?.Dispose();
         actorControlHook?.Dispose();
+        DisposeECommonsCapture();
+        ECommonsMain.Dispose();
         PluginInterface.UiBuilder.OpenConfigUi -= OpenMainUi;
         PluginInterface.UiBuilder.OpenMainUi -= OpenMainUi;
         PluginInterface.UiBuilder.Draw -= windowSystem.Draw;
@@ -308,6 +306,36 @@ public sealed partial class Plugin : IDalamudPlugin
     public void SetCaptureActionEffects(bool enabled)
     {
         Configuration.CaptureActionEffects = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetCaptureECommonsVfxEvents(bool enabled)
+    {
+        Configuration.CaptureECommonsVfxEvents = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetCaptureECommonsMapEffects(bool enabled)
+    {
+        Configuration.CaptureECommonsMapEffects = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetCaptureECommonsDirectorUpdates(bool enabled)
+    {
+        Configuration.CaptureECommonsDirectorUpdates = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetCaptureECommonsObjectLifeEvents(bool enabled)
+    {
+        Configuration.CaptureECommonsObjectLifeEvents = enabled;
+        SaveConfiguration();
+    }
+
+    public void SetCaptureECommonsTethers(bool enabled)
+    {
+        Configuration.CaptureECommonsTethers = enabled;
         SaveConfiguration();
     }
 
@@ -472,9 +500,13 @@ public sealed partial class Plugin : IDalamudPlugin
                 inCombat = Condition[ConditionFlag.InCombat],
                 hooks = new
                 {
-                    actionEffect = actionEffectHook is not null,
+                    actionEffect = ECommonsActionEffectHookEnabled,
                     effectResult = effectResultHookEnabled,
                     actorControl = actorControlHookEnabled,
+                    ecommonsVfx = ECommonsVfxHookEnabled,
+                    ecommonsMapEffect = ECommonsMapEffectHookEnabled,
+                    ecommonsDirectorUpdate = ECommonsDirectorUpdateHookEnabled,
+                    ecommonsObjectLife = ECommonsObjectLifeHookEnabled,
                     tofuFunctionWatch = DebugTofuFunctionWatchEnabled,
                 },
                 settings = new
@@ -484,6 +516,11 @@ public sealed partial class Plugin : IDalamudPlugin
                     Configuration.CaptureLogMessages,
                     Configuration.IncludeFormattedLogMessages,
                     Configuration.CaptureActionEffects,
+                    Configuration.CaptureECommonsVfxEvents,
+                    Configuration.CaptureECommonsMapEffects,
+                    Configuration.CaptureECommonsDirectorUpdates,
+                    Configuration.CaptureECommonsObjectLifeEvents,
+                    Configuration.CaptureECommonsTethers,
                     Configuration.CaptureEffectResultPackets,
                     Configuration.CaptureActorControlPackets,
                     Configuration.CapturePartySnapshots,
@@ -565,6 +602,15 @@ public sealed partial class Plugin : IDalamudPlugin
             Configuration.PullRecorderSnapshotIntervalMs = 250;
             Configuration.Version = 3;
         }
+        if (Configuration.Version < 4)
+        {
+            Configuration.CaptureECommonsVfxEvents = true;
+            Configuration.CaptureECommonsMapEffects = true;
+            Configuration.CaptureECommonsDirectorUpdates = true;
+            Configuration.CaptureECommonsObjectLifeEvents = true;
+            Configuration.CaptureECommonsTethers = true;
+            Configuration.Version = 4;
+        }
 
         Configuration.SnapshotIntervalMs = Math.Clamp(Configuration.SnapshotIntervalMs, 100, 2_000);
         Configuration.PullRecorderSnapshotIntervalMs = Math.Clamp(Configuration.PullRecorderSnapshotIntervalMs, 100, 2_000);
@@ -635,6 +681,9 @@ public sealed partial class Plugin : IDalamudPlugin
         IReadOnlyList<object> mechanicCandidateLifetimes = Configuration.PullRecorderCaptureObjectTable
             ? CaptureMechanicCandidateLifetimeSummaries(now)
             : Array.Empty<object>();
+        IReadOnlyList<object> activeVfx = Configuration.CaptureECommonsVfxEvents
+            ? CaptureTrackedVfxSnapshot()
+            : Array.Empty<object>();
 
         WriteRecord("pull-recorder-snapshot", new
         {
@@ -642,6 +691,7 @@ public sealed partial class Plugin : IDalamudPlugin
             objectTable,
             mechanicCandidates,
             mechanicCandidateLifetimes,
+            activeVfx,
             activeConditions = CaptureActiveConditions(),
         });
 
@@ -691,30 +741,6 @@ public sealed partial class Plugin : IDalamudPlugin
             LastError = $"LogMessage capture failed: {ex.Message}";
             Log.Warning(ex, "Could not capture Nai Debug Console log message.");
         }
-    }
-
-    private unsafe void OnReceiveActionEffect(
-        uint casterEntityId,
-        Character* casterPtr,
-        Vector3* targetPos,
-        ActionEffectHandler.Header* header,
-        ActionEffectHandler.TargetEffects* effects,
-        GameObjectId* targetEntityIds)
-    {
-        try
-        {
-            if (Configuration.CaptureActionEffects && ShouldCapture())
-            {
-                CaptureActionEffects(casterEntityId, casterPtr, targetPos, header, effects, targetEntityIds);
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = $"ActionEffect capture failed: {ex.Message}";
-            Log.Warning(ex, "Could not capture Nai Debug Console action effect.");
-        }
-
-        actionEffectHook?.Original(casterEntityId, casterPtr, targetPos, header, effects, targetEntityIds);
     }
 
     private unsafe void OnProcessPacketEffectResult(uint targetId, IntPtr actionIntegrityData, byte isReplay)
@@ -847,99 +873,6 @@ public sealed partial class Plugin : IDalamudPlugin
             targetEntityId,
             targetObject = targetEntityId == 0 ? null : CaptureGameObject(ObjectTable.SearchByEntityId(targetEntityId)),
             param9,
-        });
-    }
-
-    private unsafe void CaptureActionEffects(
-        uint casterEntityId,
-        Character* casterPtr,
-        Vector3* targetPos,
-        ActionEffectHandler.Header* header,
-        ActionEffectHandler.TargetEffects* effects,
-        GameObjectId* targetEntityIds)
-    {
-        if (header is null || effects is null || targetEntityIds is null || header->NumTargets == 0)
-        {
-            return;
-        }
-
-        var targets = new List<object>();
-        for (var targetIndex = 0; targetIndex < header->NumTargets; targetIndex++)
-        {
-            var targetId = targetEntityIds[targetIndex];
-            var targetEntityId = GetShortEntityId(targetId);
-            var targetObject = targetEntityId == 0 ? null : ObjectTable.SearchByEntityId(targetEntityId);
-            var rawEffects = new List<object>();
-
-            for (var effectIndex = 0; effectIndex < 8; effectIndex++)
-            {
-                ref var effect = ref effects[targetIndex].Effects[effectIndex];
-                if (effect.Type == 0)
-                {
-                    continue;
-                }
-
-                var amount = (uint)effect.Value;
-                if ((effect.Param4 & 0x40) == 0x40)
-                {
-                    amount += (uint)effect.Param3 << 16;
-                }
-
-                rawEffects.Add(new
-                {
-                    index = effectIndex,
-                    type = effect.Type,
-                    typeName = Enum.IsDefined(typeof(ActionEffectKind), effect.Type)
-                        ? ((ActionEffectKind)effect.Type).ToString()
-                        : $"Unknown{effect.Type}",
-                    value = effect.Value,
-                    calculatedAmount = amount,
-                    param0 = effect.Param0,
-                    param1 = effect.Param1,
-                    param3 = effect.Param3,
-                    param4 = effect.Param4,
-                    damageType = effect.Param1 & 0xF,
-                    isCrit = (effect.Param0 & 0x20) == 0x20,
-                    isDirectHit = (effect.Param0 & 0x40) == 0x40,
-                });
-            }
-
-            if (rawEffects.Count == 0)
-            {
-                continue;
-            }
-
-            targets.Add(new
-            {
-                index = targetIndex,
-                rawTargetId = targetId.Id.ToString(CultureInfo.InvariantCulture),
-                objectId = targetId.ObjectId,
-                entityId = targetEntityId,
-                objectSnapshot = CaptureGameObject(targetObject),
-                effects = rawEffects,
-            });
-        }
-
-        if (targets.Count == 0)
-        {
-            return;
-        }
-
-        WriteRecord("action-effect", new
-        {
-            casterEntityId,
-            casterName = casterPtr is null ? null : casterPtr->NameString,
-            casterObject = CaptureGameObject(ObjectTable.SearchByEntityId(casterEntityId)),
-            targetPosition = targetPos is null
-                ? null
-                : new { x = targetPos->X, y = targetPos->Y, z = targetPos->Z },
-            actionType = header->ActionType,
-            actionId = header->ActionId,
-            spellId = header->SpellId,
-            actionName = GetActionName(header->ActionId),
-            spellName = GetActionName(header->SpellId),
-            numTargets = header->NumTargets,
-            targets,
         });
     }
 
@@ -1145,6 +1078,7 @@ public sealed partial class Plugin : IDalamudPlugin
                     },
                 rotation = gameObject?.Rotation,
                 statuses = CaptureStatuses(member.Statuses),
+                tethers = CaptureTethers(gameObject),
             });
             partyIndex++;
         }
@@ -1162,7 +1096,7 @@ public sealed partial class Plugin : IDalamudPlugin
                 continue;
             }
 
-            if (CaptureGameObject(gameObject) is { } snapshot)
+            if (CaptureGameObject(gameObject, includeTethers: false) is { } snapshot)
             {
                 objects.Add(snapshot);
             }
@@ -1537,7 +1471,7 @@ public sealed partial class Plugin : IDalamudPlugin
         };
     }
 
-    private object? CaptureGameObject(IGameObject? gameObject)
+    private object? CaptureGameObject(IGameObject? gameObject, bool includeTethers = false)
     {
         if (gameObject is null)
         {
@@ -1576,6 +1510,7 @@ public sealed partial class Plugin : IDalamudPlugin
                 }
                 : null,
             statuses = gameObject is IBattleChara battleChara ? CaptureStatuses(battleChara.StatusList) : [],
+            tethers = includeTethers ? CaptureTethers(gameObject) : [],
         };
     }
 
@@ -1759,15 +1694,5 @@ public sealed partial class Plugin : IDalamudPlugin
 
         var shieldPercentage = Math.Clamp((double)character.ShieldPercentage, 0.0, 100.0);
         return (uint)Math.Round(maxHp * shieldPercentage / 100.0, MidpointRounding.AwayFromZero);
-    }
-
-    private static uint GetShortEntityId(GameObjectId targetId)
-    {
-        if (targetId.ObjectId != 0)
-        {
-            return targetId.ObjectId;
-        }
-
-        return targetId.Id <= uint.MaxValue ? (uint)targetId.Id : 0;
     }
 }

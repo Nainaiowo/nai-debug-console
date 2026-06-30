@@ -6,7 +6,7 @@ namespace NaiDebugConsole;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 3;
+    public int Version { get; set; } = 4;
 
     public bool ShowWindow { get; set; } = true;
 
@@ -19,6 +19,16 @@ public sealed class Configuration : IPluginConfiguration
     public bool IncludeFormattedLogMessages { get; set; }
 
     public bool CaptureActionEffects { get; set; } = true;
+
+    public bool CaptureECommonsVfxEvents { get; set; } = true;
+
+    public bool CaptureECommonsMapEffects { get; set; } = true;
+
+    public bool CaptureECommonsDirectorUpdates { get; set; } = true;
+
+    public bool CaptureECommonsObjectLifeEvents { get; set; } = true;
+
+    public bool CaptureECommonsTethers { get; set; } = true;
 
     public bool CaptureEffectResultPackets { get; set; } = true;
 
