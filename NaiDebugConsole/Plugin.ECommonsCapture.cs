@@ -118,6 +118,7 @@ public sealed partial class Plugin
         {
             vfxPtr = FormatPointer(vfxPtr),
             path,
+            vfx = CaptureVfxStruct(vfxPtr),
             casterAddress = FormatPointer(casterAddress),
             casterObject = CaptureGameObject(FindObjectByAddress(casterAddress)),
             targetAddress = FormatPointer(targetAddress),
@@ -153,6 +154,7 @@ public sealed partial class Plugin
         {
             vfxPtr = FormatPointer(vfxPtr),
             path,
+            vfx = CaptureVfxStruct(vfxPtr),
             systemSource,
         });
     }
@@ -167,6 +169,7 @@ public sealed partial class Plugin
         WriteRecord("ecommons-static-vfx-run", new
         {
             vfxPtr = FormatPointer(staticVfxAddress),
+            vfx = CaptureVfxStruct(staticVfxAddress),
             a1,
             a2,
         });
@@ -376,6 +379,49 @@ public sealed partial class Plugin
                         },
                 })
                 .ToList();
+        }
+    }
+
+    private static unsafe object? CaptureVfxStruct(nint vfxPtr)
+    {
+        if (vfxPtr == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var vfx = (VfxStruct*)vfxPtr;
+            return new
+            {
+                position = new
+                {
+                    x = vfx->Position.X,
+                    y = vfx->Position.Y,
+                    z = vfx->Position.Z,
+                },
+                rotation = new
+                {
+                    x = vfx->Rotation.X,
+                    y = vfx->Rotation.Y,
+                    z = vfx->Rotation.Z,
+                    w = vfx->Rotation.W,
+                },
+                scale = new
+                {
+                    x = vfx->Scale.X,
+                    y = vfx->Scale.Y,
+                    z = vfx->Scale.Z,
+                },
+                actorCasterId = vfx->ActorCasterID.ToString(CultureInfo.InvariantCulture),
+                actorTargetId = vfx->ActorTargetID.ToString(CultureInfo.InvariantCulture),
+                staticCasterId = vfx->StaticCasterID.ToString(CultureInfo.InvariantCulture),
+                staticTargetId = vfx->StaticTargetID.ToString(CultureInfo.InvariantCulture),
+            };
+        }
+        catch
+        {
+            return null;
         }
     }
 
